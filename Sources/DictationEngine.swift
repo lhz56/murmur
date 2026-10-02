@@ -1,0 +1,527 @@
+import AVFoundation
+import Speech
+import Combine
+import OSLog
+
+enum RecordingPhase: Equatable {
+    case idle, preparing, downloading, recording, finishing
+    var isBusy: Bool { self != .idle }
+    var label: String {
+        switch self {
+        case .idle: return "Ready when you are"
+        case .preparing: return "Getting ready…"
+        case .downloading: return "Downloading speech model…"
+        case .recording: return "Listening"
+        case .finishing: return "Wrapping up…"
+        }
+    }
+}
+
+enum DictationError: LocalizedError {
+    case microphone, noInput, missingMicrophone, unsupportedLanguage, unavailable, conversion, cancelled, setupDelay
+    var errorDescription: String? {
+        switch self {
+        case .microphone: return "Murmur needs microphone access. Enable it in System Settings → Privacy & Security → Microphone, then try again."
+        case .noInput: return "The microphone didn’t send audio. Check the selected input with Make it yours → Test microphone, then try again."
+        case .missingMicrophone: return "Your selected microphone is disconnected. Choose an available microphone in Murmur’s settings."
+        case .unsupportedLanguage: return "Apple’s on-device engine doesn’t support this language yet. Choose a different language in Murmur’s settings."
+        case .unavailable: return "On-device speech isn’t available on this Mac. Murmur requires an Apple silicon Mac with macOS 26 or later."
+        case .conversion: return "The microphone’s audio couldn’t be converted. Try a different input in System Settings → Sound. Your recording has been kept."
+        case .cancelled: return "Setup was cancelled."
+        case .setupDelay: return "Speech setup took too long. Your audio was kept; retry transcription from the library after the model is ready."
+        }
+    }
+}
+
+/// Copies the realtime microphone buffer, then does disk I/O and conversion off the audio thread.
+final class AudioPipeline: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "app.murmur.audio", qos: .userInitiated)
+    private var converter: AVAudioConverter?
+    private var targetFormat: AVAudioFormat?
+    private var continuation: AsyncStream<AnalyzerInput>.Continuation?
+    private var pending: [AVAudioPCMBuffer] = []
+    private var pendingSeconds: Double = 0
+    private var buffering = true
+    private var signal = InputSignal()
+    private var file: AVAudioFile?
+    private let audioURL: URL
+    private let expectedInputFormat: AVAudioFormat
+    private var lastMeterTime: TimeInterval = 0
+    private var failed = false
+    private var finished = false
+    let onMeter: (Float) -> Void
+    let onError: (Error) -> Void
+    var onSignal: ((InputSignal) -> Void)?
+
+    convenience init(inputFormat: AVAudioFormat, targetFormat: AVAudioFormat, audioURL: URL,
+         continuation: AsyncStream<AnalyzerInput>.Continuation,
+         onMeter: @escaping (Float) -> Void, onError: @escaping (Error) -> Void) throws {
+        try self.init(inputFormat: inputFormat, audioURL: audioURL, onMeter: onMeter, onError: onError)
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { throw DictationError.conversion }
+        self.converter = converter
+        self.targetFormat = targetFormat
+        self.continuation = continuation
+    }
+
+    init(inputFormat: AVAudioFormat, audioURL: URL, onMeter: @escaping (Float) -> Void, onError: @escaping (Error) -> Void) throws {
+        self.onMeter = onMeter; self.onError = onError
+        self.audioURL = audioURL; self.expectedInputFormat = inputFormat
+    }
+
+    private func openFile(_ format: AVAudioFormat) throws {
+        file = try AVAudioFile(forWriting: audioURL, settings: [
+            AVFormatIDKey: kAudioFormatAppleLossless,
+            AVSampleRateKey: format.sampleRate,
+            AVNumberOfChannelsKey: format.channelCount,
+            AVEncoderBitDepthHintKey: 16
+        ], commonFormat: format.commonFormat, interleaved: format.isInterleaved)
+    }
+
+    /// Capture starts first. Replay every early buffer in order when the model becomes ready.
+    func attach(target: AVAudioFormat, stream: AsyncStream<AnalyzerInput>.Continuation) async throws {
+        try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                do {
+                    guard !finished else { throw DictationError.cancelled }
+                    let first = pending.first?.format ?? file?.processingFormat ?? expectedInputFormat
+                    guard let created = AVAudioConverter(from: first, to: target) else { throw DictationError.conversion }
+                    created.primeMethod = .none
+                    converter = created; targetFormat = target; continuation = stream
+                    for buffer in pending { try convert(buffer) }
+                    pending.removeAll(); pendingSeconds = 0; buffering = false
+                    done.resume()
+                } catch { done.resume(throwing: error) }
+            }
+        }
+    }
+
+    func discardPreviewBuffers() async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in pending.removeAll(); pendingSeconds = 0; buffering = false; done.resume() }
+        }
+    }
+
+    private func convert(_ copy: AVAudioPCMBuffer) throws {
+        guard let targetFormat, let continuation else { return }
+        if converter?.inputFormat != copy.format {
+            guard let replacement = AVAudioConverter(from: copy.format, to: targetFormat) else { throw DictationError.conversion }
+            replacement.primeMethod = .none; converter = replacement
+        }
+        guard let converter else { throw DictationError.conversion }
+        let capacity = AVAudioFrameCount(ceil(Double(copy.frameLength) * targetFormat.sampleRate / copy.format.sampleRate)) + 32
+        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { throw DictationError.conversion }
+        var conversionError: NSError?; var supplied = false
+        let status = converter.convert(to: output, error: &conversionError) { _, inputStatus in
+            if supplied { inputStatus.pointee = .noDataNow; return nil }
+            supplied = true; inputStatus.pointee = .haveData; return copy
+        }
+        if let conversionError { throw conversionError }
+        if status == .error { throw DictationError.conversion }
+        if output.frameLength > 0 { continuation.yield(AnalyzerInput(buffer: output)) }
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return }
+        copy.frameLength = buffer.frameLength
+        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
+        let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        for index in 0..<source.count {
+            if let src = source[index].mData, let dst = destination[index].mData {
+                memcpy(dst, src, Int(source[index].mDataByteSize))
+            }
+        }
+        queue.async { [self] in
+            guard !failed, !finished else { return }
+            do {
+                if file == nil { try openFile(copy.format) }
+                try file?.write(from: copy)
+                if converter != nil { try convert(copy) }
+                else if buffering {
+                    pendingSeconds += Double(copy.frameLength) / copy.format.sampleRate
+                    if pendingSeconds > 120 { throw DictationError.setupDelay }
+                    pending.append(copy)
+                }
+                signal.observe(copy)
+                let now = Date.timeIntervalSinceReferenceDate
+                if now - lastMeterTime > 0.055 {
+                    let value = signal
+                    lastMeterTime = now
+                    DispatchQueue.main.async { self.onMeter(value.level); self.onSignal?(value) }
+                }
+            } catch {
+                failed = true
+                DispatchQueue.main.async { self.onError(error) }
+            }
+        }
+    }
+
+    @discardableResult func finish() async -> InputSignal {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in
+                file = nil // Flush the lossless container before saved audio can be played.
+                continuation?.finish()
+                continuation = nil; converter = nil; targetFormat = nil
+                finished = true; buffering = false
+                pending.removeAll()
+                done.resume()
+            }
+        }
+        return signal
+    }
+}
+
+@MainActor
+final class DictationEngine: ObservableObject {
+    @Published var phase: RecordingPhase = .idle
+    @Published var liveText = ""
+    @Published var level: Float = 0
+    @Published var elapsed: TimeInterval = 0
+    @Published var downloadProgress: Double = 0
+    @Published var supportedLanguages: [Locale] = []
+    @Published var inputName = ""
+    @Published var signal = InputSignal()
+    @Published var recognitionPreparing = false
+    @Published var confidence: Float?
+    var onText: ((String) -> Void)?
+    var onError: ((Error) -> Void)?
+
+    private var engine: AVAudioEngine?
+    private var preparedEngine: AVAudioEngine?
+    private var preparedDevice: Microphone?
+    private var inputPreparation: Task<AVAudioEngine, Error>?
+    private var preparingDevice: Microphone?
+    private var inputPreparationID: UUID?
+    private var selectedMicrophoneUID = ""
+    private var pipeline: AudioPipeline?
+    private var analyzer: SpeechAnalyzer?
+    private var resultsTask: Task<Void, Error>?
+    private var clock: Timer?
+    private var progressTimer: Timer?
+    private var finalized = ""
+    private var volatile = ""
+    private var startedAt: Date?
+    private var generation = UUID()
+    private var tapInstalled = false
+    private var setupTask: Task<Void, Error>?
+    private var recordedURL: URL?
+    private var selectedEngine: RecognitionEngine = .apple
+    private var selectedLocale = "en-US"
+    private var selectedVocabulary = ""
+    private var stopRequested = false
+    private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
+    let localSpeech = LocalRecognition()
+
+    private func preparedInput(uid: String) async throws -> AVAudioEngine {
+        let device = try Microphones.selected(uid: uid)
+        if preparedDevice == device, let preparedEngine, Microphones.isConfigured(preparedEngine, for: device) {
+            return preparedEngine
+        }
+        preparedEngine = nil; preparedDevice = nil
+        let task: Task<AVAudioEngine, Error>
+        let preparationID: UUID
+        if preparingDevice == device, let pending = inputPreparation, let pendingID = inputPreparationID {
+            task = pending; preparationID = pendingID
+        } else {
+            inputPreparation?.cancel()
+            preparationID = UUID()
+            task = Task { @MainActor in
+                let audio = AVAudioEngine()
+                _ = try await Microphones.configure(audio, uid: device.id)
+                try Task.checkCancellation()
+                audio.prepare()
+                return audio
+            }
+            inputPreparation = task; preparingDevice = device; inputPreparationID = preparationID
+        }
+        do {
+            let audio = try await task.value
+            // Shared waiters cannot reinstall a graph after recording consumes it.
+            if inputPreparationID == preparationID {
+                preparedEngine = audio; preparedDevice = device
+                inputPreparation = nil; preparingDevice = nil; inputPreparationID = nil
+            }
+            return audio
+        } catch {
+            if inputPreparationID == preparationID {
+                inputPreparation = nil; preparingDevice = nil; inputPreparationID = nil
+            }
+            throw error
+        }
+    }
+
+    private func takePreparedInput(uid: String) async throws -> AVAudioEngine {
+        let audio = try await preparedInput(uid: uid)
+        if preparedEngine === audio { preparedEngine = nil; preparedDevice = nil }
+        return audio
+    }
+
+    private func discardPreparedInput() {
+        inputPreparation?.cancel()
+        inputPreparation = nil; preparingDevice = nil; inputPreparationID = nil
+        preparedEngine = nil; preparedDevice = nil
+    }
+
+    func warmMicrophone(uid: String) async {
+        guard (phase == .idle || phase == .finishing), engine == nil,
+              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        _ = try? await preparedInput(uid: uid)
+    }
+
+    func refreshLanguages() async {
+        supportedLanguages = await SpeechTranscriber.supportedLocales.sorted { $0.identifier < $1.identifier }
+    }
+
+    private func makeTranscriber(localeID: String) async throws -> SpeechTranscriber {
+        guard SpeechTranscriber.isAvailable else { throw DictationError.unavailable }
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: localeID)) else {
+            throw DictationError.unsupportedLanguage
+        }
+        // Keep live provisional text without fastResults, which trades away recognition accuracy.
+        let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [],
+                                            reportingOptions: [.volatileResults], attributeOptions: [.transcriptionConfidence])
+        try Task.checkCancellation()
+        try await AssetInventory.reserve(locale: locale)
+        try Task.checkCancellation()
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try Task.checkCancellation()
+            if phase != .recording && phase != .finishing { phase = .downloading }
+            downloadProgress = 0
+            progressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.downloadProgress = request.progress.fractionCompleted }
+            }
+            defer { progressTimer?.invalidate(); progressTimer = nil }
+            try await request.downloadAndInstall()
+        }
+        return transcriber
+    }
+
+    func start(audioURL: URL, localeID: String, microphoneUID: String = "", recognitionEngine: RecognitionEngine = .apple, vocabulary: String = "") async throws {
+        guard phase == .idle else { return }
+        phase = .preparing
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        generation = UUID()
+        let session = generation
+        finalized = ""; volatile = ""; liveText = ""; elapsed = 0; level = 0
+        signal = InputSignal(); confidence = nil
+        stopRequested = false
+        recordedURL = audioURL; selectedEngine = recognitionEngine; selectedLocale = localeID; selectedVocabulary = vocabulary
+        selectedMicrophoneUID = microphoneUID
+        do {
+            let granted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? true : await AVCaptureDevice.requestAccess(for: .audio)
+            guard granted else { throw DictationError.microphone }
+            guard session == generation, !stopRequested else { throw DictationError.cancelled }
+            var audioEngine = try await takePreparedInput(uid: microphoneUID)
+            inputName = try Microphones.selected(uid: microphoneUID).name
+            guard session == generation, !stopRequested else { throw DictationError.cancelled }
+            var format = audioEngine.inputNode.inputFormat(forBus: 0)
+            guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
+            let capture = try AudioPipeline(inputFormat: format, audioURL: audioURL, onMeter: { [weak self] level in
+                guard self?.generation == session else { return }
+                self?.level = level
+            }, onError: { [weak self] error in
+                guard self?.generation == session else { return }
+                self?.onError?(error)
+            })
+            capture.onSignal = { [weak self] value in
+                guard self?.generation == session else { return }; self?.signal = value
+            }
+            pipeline = capture
+            for attempt in 0..<2 {
+                guard session == generation, !stopRequested else { throw DictationError.cancelled }
+                engine = audioEngine
+                audioEngine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in capture.append(buffer) }
+                tapInstalled = true
+                audioEngine.prepare()
+                do { try audioEngine.start(); break }
+                catch {
+                    stopCapture(); discardPreparedInput()
+                    guard attempt == 0, session == generation, !stopRequested else { throw error }
+                    // Device changes can race the tap. Retry once with a new graph.
+                    audioEngine = try await takePreparedInput(uid: microphoneUID)
+                    format = audioEngine.inputNode.inputFormat(forBus: 0)
+                    guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
+                }
+            }
+            startedAt = Date()
+            clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, let start = self.startedAt else { return }
+                    self.elapsed = Date().timeIntervalSince(start)
+                }
+            }
+            // The start cue is emitted by the app only after actual microphone frames arrive.
+            for _ in 0..<60 {
+                guard session == generation, !stopRequested else { throw DictationError.cancelled }
+                if signal.hasFrames { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard signal.hasFrames else { throw DictationError.noInput }
+            phase = .recording
+            recognitionPreparing = true
+            // Start the preview after microphone readiness, so its setup cannot delay the cue.
+            setupTask = Task { [weak self] in
+                guard let self else { return }
+                defer { if self.generation == session { self.recognitionPreparing = false } }
+                do {
+                    let transcriber = try await self.makeTranscriber(localeID: localeID)
+                    guard self.generation == session, !Task.isCancelled else { throw DictationError.cancelled }
+                    guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: format) else { throw DictationError.conversion }
+                    let stream = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .unbounded)
+                    let speechAnalyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .lingering))
+                    self.analyzer = speechAnalyzer
+                    try await speechAnalyzer.prepareToAnalyze(in: target)
+                    guard self.generation == session, !Task.isCancelled else { throw DictationError.cancelled }
+                    self.observeResults(transcriber, session: session)
+                    try await capture.attach(target: target, stream: stream.continuation)
+                    guard self.generation == session, !Task.isCancelled else { throw DictationError.cancelled }
+                    try await speechAnalyzer.start(inputSequence: stream.stream)
+                } catch {
+                    if self.generation != session || recognitionEngine == .apple { throw error }
+                    // Other local engines can finish from the saved audio even without Apple preview.
+                    await capture.discardPreviewBuffers()
+                }
+            }
+            timingLog.info("Microphone ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+        } catch {
+            discardPreparedInput()
+            await abort()
+            throw error
+        }
+    }
+
+    private func observeResults(_ transcriber: SpeechTranscriber, session: UUID) {
+        resultsTask = Task { [weak self] in
+            do {
+                for try await result in transcriber.results {
+                    guard let self, generation == session, !Task.isCancelled else { break }
+                    let text = String(result.text.characters)
+                    if result.isFinal {
+                        let values = result.text.runs.compactMap { $0.transcriptionConfidence }
+                        if !values.isEmpty { confidence = Float(values.reduce(0, +) / Double(values.count)) }
+                    }
+                    if result.isFinal { finalized += text; volatile = "" } else { volatile = text }
+                    liveText = finalized + volatile
+                    onText?(liveText)
+                }
+            } catch {
+                if self?.generation == session, self?.phase == .recording { self?.onError?(error) }
+                throw error
+            }
+        }
+    }
+
+    /// Called synchronously from key release, before scheduling any finalization.
+    @discardableResult func requestStop() -> Bool {
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        guard phase == .recording else {
+            if phase == .preparing || phase == .downloading {
+                stopRequested = true
+                stopCapture()
+            }
+            return false
+        }
+        phase = .finishing
+        clock?.invalidate(); clock = nil
+        if let start = startedAt { elapsed = Date().timeIntervalSince(start) }
+        stopCapture()
+        level = 0
+        timingLog.info("Microphone stopped in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+        Task { [weak self] in
+            guard let self else { return }
+            await self.warmMicrophone(uid: self.selectedMicrophoneUID)
+        }
+        return true
+    }
+
+    func stop() async throws -> String {
+        if phase == .recording { requestStop() }
+        guard phase == .finishing else { return liveText }
+        do {
+            if selectedEngine != .apple, let url = recordedURL {
+                // The final model needs only the saved audio. Never hold it up
+                // while Apple's provisional preview finishes or downloads.
+                generation = UUID()
+                setupTask?.cancel(); setupTask = nil; recognitionPreparing = false
+                let preview = analyzer; analyzer = nil
+                resultsTask?.cancel(); resultsTask = nil
+                if let preview { Task { await preview.cancelAndFinishNow() } }
+                if let capture = pipeline { signal = await capture.finish() }
+                pipeline = nil
+                let result = try await localSpeech.transcribe(url, engine: selectedEngine, locale: selectedLocale, vocabulary: selectedVocabulary)
+                liveText = result.text; confidence = result.confidence
+            } else {
+                try await setupTask?.value; setupTask = nil
+                if let capture = pipeline { signal = await capture.finish() }
+                pipeline = nil
+                try await analyzer?.finalizeAndFinishThroughEndOfInput()
+                try await resultsTask?.value
+                liveText = finalized + volatile
+            }
+            onText?(liveText)
+            analyzer = nil; resultsTask = nil
+            phase = .idle; level = 0
+            return liveText
+        } catch {
+            await abort()
+            throw error
+        }
+    }
+
+    func transcribeFile(_ url: URL, localeID: String, recognitionEngine: RecognitionEngine = .apple, vocabulary: String = "") async throws -> String {
+        guard phase == .idle else { throw DictationError.unavailable }
+        phase = .preparing
+        generation = UUID()
+        let session = generation
+        finalized = ""; volatile = ""; liveText = ""; elapsed = 0
+        confidence = nil
+        do {
+            signal = try await Task.detached { try AudioFileConversion.signal(url) }.value
+            if recognitionEngine != .apple {
+                let file = try AVAudioFile(forReading: url)
+                elapsed = Double(file.length) / file.processingFormat.sampleRate
+                phase = .finishing
+                let result = try await localSpeech.transcribe(url, engine: recognitionEngine, locale: localeID, vocabulary: vocabulary)
+                liveText = result.text; confidence = result.confidence; phase = .idle
+                return result.text
+            }
+            let transcriber = try await makeTranscriber(localeID: localeID)
+            let file = try AVAudioFile(forReading: url)
+            elapsed = Double(file.length) / file.processingFormat.sampleRate
+            let speechAnalyzer = SpeechAnalyzer(modules: [transcriber])
+            analyzer = speechAnalyzer
+            observeResults(transcriber, session: session)
+            phase = .finishing
+            if let last = try await speechAnalyzer.analyzeSequence(from: file) {
+                try await speechAnalyzer.finalizeAndFinish(through: last)
+            } else { await speechAnalyzer.cancelAndFinishNow() }
+            try await resultsTask?.value
+            let text = finalized + volatile
+            phase = .idle; analyzer = nil; resultsTask = nil
+            return text
+        } catch { await abort(); throw error }
+    }
+
+    private func stopCapture() {
+        engine?.stop()
+        if tapInstalled { engine?.inputNode.removeTap(onBus: 0); tapInstalled = false }
+        engine = nil
+    }
+
+    func abort() async {
+        generation = UUID()
+        setupTask?.cancel(); setupTask = nil; recognitionPreparing = false
+        clock?.invalidate(); clock = nil
+        progressTimer?.invalidate(); progressTimer = nil
+        stopCapture()
+        if let pipeline { signal = await pipeline.finish() }
+        pipeline = nil
+        let abandonedAnalyzer = analyzer; analyzer = nil
+        resultsTask?.cancel(); resultsTask = nil
+        phase = .idle; level = 0
+        // A recognizer still preparing can delay cancellation indefinitely. Release
+        // the recording session now; its generation prevents late results or setup.
+        if let abandonedAnalyzer {
+            Task { await abandonedAnalyzer.cancelAndFinishNow() }
+        }
+    }
+}

@@ -1,0 +1,101 @@
+{
+  "date": "2026-10-02",
+  "machine": "Apple silicon Mac16,10",
+  "fixture": "generated speech, 7.3 seconds",
+  "warmupSeconds": 0.9684388332534581,
+  "finalPassSeconds": [
+    0.2553247082978487,
+    0.20871058339253068,
+    0.21286787488497794
+  ],
+  "firstAndLastWordsPreserved": true,
+  "startupDeadlineRecoveryPassed": true,
+  "synchronousReleaseAndEarlyCancellationPassed": true,
+  "scope": "Local sample measurements; microphone and clipboard timings measured separately in installed-app logs.",
+  "clipboardDeliverySeconds": [
+    0.0034339167177677155,
+    0.0005076664965599775,
+    0.0005757915787398815
+  ],
+  "clipboardMatchedFinalText": true,
+  "microphoneStopSeconds": 0.003311125,
+  "nativeTimingScope": "Installed final app; start measured to first received audio, stop measured within synchronous stop call, final includes transcription. Physical modifier polling and human accuracy require user judgment. Quiet short microphone recordings produced no text; a 43-second recording produced nonempty text matching the clipboard.",
+  "nativeInstalledBuild": {
+    "repeatedStartStopCyclesPassed": 4,
+    "input": "EarPods Microphone",
+    "warmStartSeconds": [
+      1.333239708,
+      0.899522708,
+      0.429358958
+    ],
+    "microphoneStopSeconds": [
+      0.033103708,
+      0.073535625,
+      0.023700375,
+      0.022523208
+    ],
+    "stopToFinalSeconds": [
+      1.064923292,
+      1.655558458,
+      0.61417025,
+      0.273967042
+    ],
+    "audioDurationSeconds": [
+      8.160377,
+      43.288524,
+      1.558025,
+      1.754339
+    ],
+    "clipboardMatchedNonemptyFinalText": true,
+    "audioFormatErrors": 0,
+    "permissionPromptExcludedFromStartTimings": true
+  },
+  "insertionUpdateClipboardCheck": {
+    "passed": true,
+    "finalPassSeconds": [
+      0.42889108322560787,
+      0.3854708333965391,
+      0.6950145417358726
+    ],
+    "clipboardDeliverySeconds": [
+      0.00638633337803185,
+      0.0004038750194013119,
+      0.000550916651263833
+    ],
+    "nativeTextInsertionVerified": true,
+    "accessibilityEnabledInInstalledApp": true,
+    "accessibilityPermissionRetainedAfterRelaunch": true,
+    "nativeReceiver": "AppKit NSTextField in MurmurTextBoxCheck",
+    "nativeEmptyFieldInsertionPassed": true,
+    "nativeWholeSelectionReplacementPassed": true,
+    "nativeSelectionSeed": "Before \ud83d\ude00 after",
+    "nativeExpectedText": "Murmur insertion test.",
+    "nativeClipboardMatchedReceiver": true,
+    "nativeSecondFieldUnchanged": true,
+    "nativeScope": "Installed certificate-signed app, Settings Test insertion through the production destination capture and clipboard/paste path; physical foreground focus supplied by the user; does not test microphone or every destination app."
+  },
+  "signedHelperPreparationCheck": {
+    "coldPreparationSeconds": 29.979,
+    "warmPreparationSeconds": 0.501,
+    "defaultStartupTimeoutSeconds": 60,
+    "timeoutCleanupAndConcurrentReadinessRetryPassed": true,
+    "fixtureFinalPassSeconds": [
+      0.134,
+      0.155,
+      0.136
+    ],
+    "firstAndLastWordsPreserved": true,
+    "scope": "Certificate-signed installed helper, existing local models, generated 7.3-second speech fixture; excludes microphone, UI, and clipboard."
+  },
+  "signedIdentityMicrophoneCheck": {
+    "input": "EarPods Microphone",
+    "liveInputMeterReceivedAudio": true,
+    "displayedQuietInputDecibels": -60,
+    "audioSavedByCheck": false,
+    "microphonePermissionRetainedAfterFullQuitAndRelaunch": true,
+    "accessibilityPermissionRetainedAfterFullQuitAndRelaunch": true,
+    "freshProcessRequirementVerified": true,
+    "freshProcessMicrophonePromptObserved": false,
+    "scope": "Installed signed app, no-audio-file input level test, full quit and relaunch, and fresh-process macOS privacy log confirmation; does not measure speech accuracy."
+  }
+}

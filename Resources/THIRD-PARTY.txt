@@ -1,0 +1,23 @@
+Murmur local speech components
+
+FluidAudio v0.12.6 (aa800cb9630dc14727507ac0c955fa4d7ca415ec)
+https://github.com/FluidInference/FluidAudio
+Apache License 2.0. See LICENSE-FluidAudio.txt.
+
+NVIDIA Parakeet TDT 0.6b v3 model, Core ML conversion by FluidInference
+https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml
+Original model by NVIDIA; conversion by FluidInference. CC BY 4.0.
+https://creativecommons.org/licenses/by/4.0/
+Downloaded to Application Support/Murmur/Models. No recordings are uploaded.
+
+whisper.cpp v1.8.7 (48f628a84833905ee4a0658ee6d4a5c915ce1997)
+https://github.com/ggml-org/whisper.cpp
+MIT License. See LICENSE-whisper-cpp.txt.
+
+OpenAI Whisper large-v3-turbo, Q5_0 conversion distributed by whisper.cpp
+https://github.com/openai/whisper
+https://huggingface.co/ggerganov/whisper.cpp
+MIT License. See LICENSE-Whisper.txt.
+
+Swift package dependency versions and source revisions are pinned in LocalSpeech/Package.resolved.

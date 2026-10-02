@@ -1,0 +1,30 @@
+# macOS and editor metadata
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Generated apps, build caches, and downloaded speech engines/models
+*.app/
+.build/
+.swiftpm/
+.murmur-build.*/
+Resources/Helpers/
+Resources/Models/
+*.zip
+*.dmg
+*.pkg
+
+# Local credentials, signing material, and environment files
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Personal dictation data and local recognition comparisons
+Recordings/
+history*.json
+Benchmarks/recognition-results.json
