@@ -606,6 +606,11 @@ struct SettingsView: View {
                                 .buttonStyle(.bordered).disabled(!model.accessibilityEnabled || model.speech.phase.isBusy)
                             Text("Click a text box within 8 seconds. Murmur will insert a test sentence without recording audio.")
                                 .font(.system(size: 11)).foregroundStyle(Palette.muted)
+                            if let result = model.deliveryResult {
+                                Text("Last insertion: \(result.message)")
+                                    .font(.system(size: 11)).foregroundStyle(Palette.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                     section("Recordings") {

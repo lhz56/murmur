@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Murmur editor compatibility check</title>
+<style>
+  :root { color-scheme: light dark; font: 15px system-ui; }
+  body { max-width: 760px; margin: 40px auto; padding: 0 24px; }
+  h1 { font-size: 26px; letter-spacing: -.6px; }
+  p { line-height: 1.55; opacity: .75; }
+  section { padding: 18px 0; border-top: 1px solid #8885; }
+  label { display: block; font-weight: 600; margin-bottom: 9px; }
+  input, textarea, [contenteditable], #custom { width: 100%; box-sizing: border-box; font: inherit;
+    padding: 12px; border: 1px solid #8888; border-radius: 8px; background: transparent; }
+  textarea, [contenteditable], #custom { min-height: 70px; }
+  :focus { outline: 2px solid #7855d9; outline-offset: 2px; }
+  output { display: block; margin-top: 7px; font: 12px ui-monospace,monospace; opacity: .7; white-space: pre-wrap; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+</style>
+<h1>Murmur editor compatibility check</h1>
+<p>This local page sends no data and saves no recordings. Start Murmur’s Test insertion, then focus one field within eight seconds.
+  Each field should receive exactly “Murmur insertion test.” once. The paste count also catches duplicate delivery.</p>
+<button id="reset">Reset test fields</button>
+<section><label for="plain">Plain input</label><input id="plain" autocomplete="off"><output id="plain-status"></output></section>
+<section><label for="multiline">Multiline textarea</label><textarea id="multiline"></textarea><output id="multiline-status"></output></section>
+<section><label id="editable-label">Contenteditable editor</label><div id="editable" contenteditable="true" role="textbox" aria-labelledby="editable-label" aria-multiline="true"></div><output id="editable-status"></output></section>
+<section><label id="rich-label">Rich editor with nested elements</label><div id="rich" contenteditable="true" role="textbox" aria-labelledby="rich-label" aria-multiline="true"><p><strong><br></strong></p></div><output id="rich-status"></output></section>
+<section><label id="custom-label">Custom editor with a paste handler</label><div id="custom" tabindex="0" role="application" aria-labelledby="custom-label"></div><output id="custom-status"></output></section>
+<script>
+  const ids = ['plain', 'multiline', 'editable', 'rich', 'custom'];
+  const counts = Object.fromEntries(ids.map(id => [id, 0]));
+  function update(id) {
+    const element = document.getElementById(id);
+    const text = 'value' in element ? element.value : element.innerText;
+    document.getElementById(id + '-status').textContent =
+      `Paste events: ${counts[id]} · Exact single sentence: ${text.trim() === 'Murmur insertion test.' ? 'PASS' : 'waiting / mismatch'}\nValue: ${JSON.stringify(text)}`;
+  }
+  for (const id of ids) {
+    const element = document.getElementById(id);
+    element.addEventListener('paste', event => {
+      counts[id]++;
+      if (id === 'custom') {
+        event.preventDefault();
+        element.textContent += event.clipboardData.getData('text/plain');
+      }
+      setTimeout(() => update(id), 0);
+    });
+    element.addEventListener('input', () => update(id));
+    update(id);
+  }
+  document.getElementById('reset').addEventListener('click', () => {
+    for (const id of ids) {
+      const element = document.getElementById(id);
+      if ('value' in element) element.value = '';
+      else element.textContent = '';
+      if (id === 'rich') element.innerHTML = '<p><strong><br></strong></p>';
+      counts[id] = 0;
+      update(id);
+    }
+  });
+</script>
+</html>

@@ -66,7 +66,7 @@ Recordings/              Original audio files
 
 History writes are atomic and checkpointed during recording. Interrupted sessions keep recoverable audio. Retention settings can remove audio after successful transcription; existing and unfinished recordings remain available.
 
-Automatic insertion uses the clipboard and Accessibility permission. Murmur captures the editable element at recording start, waits for shortcut modifiers to release, checks focus and clipboard contents, then sends Paste without Enter. Recordings are not uploaded. Initial model downloads come from Apple's system service or public model repositories.
+Automatic insertion uses the clipboard and Accessibility permission. Murmur resolves focused editor children to their editable parent and captures the destination at recording start. It waits for shortcut modifiers to release, checks the foreground app, window, editor, and clipboard, then invokes the app's standard Paste menu command when available. Otherwise it sends one complete Command-V key sequence. Custom editors without a usable accessibility text node can receive Paste while their original focus or known window remains unchanged. Secure input, disabled controls, and clearly non-text controls are excluded. Murmur never presses Enter or retries an unconfirmed paste. Settings shows whether insertion was confirmed, Paste was sent without confirmation, or text was only copied. Recordings are not uploaded. Initial model downloads come from Apple's system service or public model repositories.
 
 ## Verification
 
@@ -77,6 +77,8 @@ Run the storage, text processing, Control/Fn shortcut, selection replacement, an
 ```
 
 Additional tests under `Tests/` exercise local audio-file recognition, buffered capture, saved-audio recovery, local workers, and latency using speech fixtures. These require the corresponding helpers, models, and system permissions.
+
+`Tools/Compatibility/` contains local browser and AppKit editor fixtures for checking exact received text and duplicate paste events. These supplement real destination-app checks; they do not establish compatibility with every application.
 
 Native checks on the development Mac verified microphone input, automatic insertion into an AppKit text field, replacement of selected text, clipboard matching, and retained Microphone/Accessibility permissions after a full quit and relaunch. `Benchmarks/latency-results.json` records limited local measurements, including model preparation and repeated start/stop cycles. Those measurements do not guarantee accuracy, timing, or insertion compatibility across every Mac or destination app. Personal recordings and their recognition comparisons are excluded from this repository.
 

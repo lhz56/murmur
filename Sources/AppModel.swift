@@ -84,7 +84,7 @@ final class AppModel: ObservableObject {
     private var pasteTarget: TextInsertion.Destination?
     private let textInsertion = TextInsertion()
     private var insertionTestTask: Task<Void, Never>?
-    private var deliveryResult: InsertionResult?
+    @Published private(set) var deliveryResult: InsertionResult?
     private var writesEnabled = true
     private var recordingTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?

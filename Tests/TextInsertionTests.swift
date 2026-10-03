@@ -53,6 +53,15 @@ import Foundation
         assert(!confirmed("Hello world", "Hello world", oldSelection, insertedCaret, "Murmur"))
         // Exact receiver text is stronger evidence than a missing or stale caret range.
         assert(confirmed("Hello world", "Hello Murmur", oldSelection, nil, "Murmur"))
+        // A rich editor may expose its complete value but no native AX range.
+        assert(confirmed("", "Hello.", nil, nil, "Hello."))
+        assert(confirmed("\n", "Hello.\n", nil, nil, "Hello."))
+        assert(!confirmed("", "Hello.Hello.", nil, nil, "Hello."))
+        assert(!confirmed(nil, "Hello.", nil, nil, "Hello."))
+        assert(!confirmed("Existing text", "Hello.", nil, nil, "Hello."))
+        assert(!confirmed("", "Hello.", NSRange(location: NSNotFound, length: 0), nil, "Hello."))
+        assert(!confirmed("", "", nil, nil, ""))
+        assert(!confirmed("\n", "\n", nil, nil, "\n"))
 
         let emojiCaret = NSRange(location: 3, length: 0)
         let advancedEmojiCaret = NSRange(location: 5, length: 0)
@@ -77,9 +86,85 @@ import Foundation
         assert(!confirmed("abc", "abc", NSRange(location: 4, length: 0),
                           NSRange(location: 5, length: 0), "x"))
 
+        // Custom editors need a positive editing capability. A selection in a
+        // read-only page must never turn its web area into a paste destination.
+        assert(!TextInsertion.isTextEditor(role: "AXWebArea", subrole: nil, enabled: true,
+                                          hasSelectedRange: true, selectedTextWritable: false, valueWritable: false))
+        assert(TextInsertion.isTextEditor(role: "AXGroup", subrole: nil, enabled: true,
+                                         hasSelectedRange: true, selectedTextWritable: true, valueWritable: false))
+        assert(TextInsertion.isTextEditor(role: "AXGroup", subrole: nil, enabled: true,
+                                         hasSelectedRange: true, selectedTextWritable: false, valueWritable: true))
+        assert(!TextInsertion.isTextEditor(role: "AXSlider", subrole: nil, enabled: true,
+                                          hasSelectedRange: false, selectedTextWritable: false, valueWritable: true))
+        // Secure and disabled controls remain excluded even if they report a
+        // standard text role or a writable text attribute.
+        assert(!TextInsertion.isTextEditor(role: "AXTextField", subrole: "AXSecureTextField", enabled: true,
+                                          hasSelectedRange: true, selectedTextWritable: true, valueWritable: true))
+        assert(!TextInsertion.isTextEditor(role: "AXTextArea", subrole: nil, enabled: false,
+                                          hasSelectedRange: true, selectedTextWritable: true, valueWritable: true))
+        assert(TextInsertion.isTextEditor(role: "AXTextArea", subrole: nil, enabled: nil,
+                                         hasSelectedRange: false, selectedTextWritable: false, valueWritable: false))
+
+        typealias Focus = TextInsertion.FocusSnapshot<String>
+        func focus(_ pid: Int32 = 1, _ window: String? = "window", _ raw: String? = "field", _ editor: String? = "field",
+                   _ signature: TextInsertion.EditorSignature? = nil, allowed: Bool = true) -> Focus {
+            Focus(pid: pid, window: window, focused: raw, editor: editor, signature: signature, allowsPaste: allowed)
+        }
+        let originalField = focus()
+        // A rich editor's focused child can change while its editing container stays the same.
+        assert(TextInsertion.matchesFocus(originalField, focus(1, "window", "text-child", "field")))
+        assert(!TextInsertion.matchesFocus(originalField, focus(1, "window", "other-field", "other-field")))
+        assert(!TextInsertion.matchesFocus(originalField, focus(2)))
+        assert(!TextInsertion.matchesFocus(originalField, focus(1, "other-window")))
+        assert(!TextInsertion.matchesFocus(originalField, focus(allowed: false)))
+        let signature = TextInsertion.EditorSignature(identifier: "composer", role: "AXTextArea",
+                                                       frame: CGRect(x: 10, y: 20, width: 400, height: 60))
+        let namedField = focus(1, "window", "old-node", "old-node", signature)
+        assert(TextInsertion.matchesFocus(namedField, focus(1, "window", "new-node", "new-node", signature)))
+        assert(!TextInsertion.matchesFocus(namedField, focus(1, "other-window", "new-node", "new-node", signature)))
+        let otherSignature = TextInsertion.EditorSignature(identifier: "composer", role: "AXTextArea",
+                                                            frame: CGRect(x: 10, y: 120, width: 400, height: 60))
+        assert(!TextInsertion.matchesFocus(namedField, focus(1, "window", "new-node", "new-node", otherSignature)))
+        assert(!TextInsertion.matchesFocus(namedField, focus(1, "window", "new-node", "new-node")))
+        let pageA = TextInsertion.EditorSignature(identifier: "composer", role: "AXTextArea", frame: signature.frame,
+                                                   document: "https://example.test/chat-a")
+        let pageB = TextInsertion.EditorSignature(identifier: "composer", role: "AXTextArea", frame: signature.frame,
+                                                   document: "https://example.test/chat-b")
+        assert(!TextInsertion.matchesFocus(focus(1, "window", "old-node", "old-node", pageA),
+                                           focus(1, "window", "new-node", "new-node", pageB)))
+        // Some web apps reuse the same composer node when navigating to another chat.
+        assert(!TextInsertion.matchesFocus(focus(1, "window", "same-node", "same-node", pageA),
+                                           focus(1, "window", "same-node", "same-node", pageB)))
+        assert(!TextInsertion.matchesFocus(focus(1, "window", "same-node", "same-node", pageA),
+                                           focus(1, "window", "same-node", "same-node")))
+        let opaque = focus(1, "window", "custom-editor", nil)
+        assert(TextInsertion.matchesFocus(opaque, focus(1, "window", "custom-editor", nil)))
+        assert(!TextInsertion.matchesFocus(opaque, focus(1, "window", "different-custom-editor", nil)))
+        // With no AX field available, compatibility paste still requires a known window.
+        let inaccessible = focus(1, "window", nil, nil)
+        assert(TextInsertion.matchesFocus(inaccessible, focus(1, "window", nil, nil)))
+        assert(!TextInsertion.matchesFocus(inaccessible, focus(1, "other-window", nil, nil)))
+        assert(!TextInsertion.matchesFocus(focus(1, nil, nil, nil), focus(1, nil, nil, nil)))
+        assert(TextInsertion.allowsCompatibilityPaste(role: "AXGroup", subrole: nil, enabled: true))
+        assert(TextInsertion.allowsCompatibilityPaste(role: nil, subrole: nil, enabled: nil))
+        assert(!TextInsertion.allowsCompatibilityPaste(role: "AXButton", subrole: nil, enabled: true))
+        assert(!TextInsertion.allowsCompatibilityPaste(role: "AXStaticText", subrole: nil, enabled: true))
+        assert(!TextInsertion.allowsCompatibilityPaste(role: "AXGroup", subrole: "AXSecureTextField", enabled: true))
+        assert(!TextInsertion.allowsCompatibilityPaste(role: "AXGroup", subrole: nil, enabled: false))
+        assert(TextInsertion.isPasteMenuCommand(character: "V", modifiers: 0, enabled: true, pressSupported: true))
+        assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: 1, enabled: true, pressSupported: true))
+        assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: 8, enabled: true, pressSupported: true))
+        assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: 0, enabled: false, pressSupported: true))
+        assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: 0, enabled: true, pressSupported: false))
+        assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: nil, enabled: true, pressSupported: true))
+        assert(!TextInsertion.isPasteMenuCommand(character: "c", modifiers: 0, enabled: true, pressSupported: true))
+
         print("PASS: insertion expectations honor UTF-16 caret and selection offsets")
         print("PASS: missing, negative, out-of-bounds, and overflowing AX ranges are rejected")
         print("PASS: receiver content takes precedence over caret-only insertion confirmation")
         print("PASS: caret-only confirmation uses UTF-16 offsets and rejects unavailable ranges")
+        print("PASS: custom editor eligibility requires writable text and excludes secure, disabled, and read-only controls")
+        print("PASS: compatibility paste stays in the original app, window, and editor; named replacements require matching geometry")
+        print("PASS: only enabled standard Command-V menu actions are eligible for a single paste attempt")
     }
 }
