@@ -449,7 +449,7 @@ struct SettingsView: View {
     @State private var desiredWord = ""
     private var shortcutInstruction: String {
         if preferences.dictationKey == .fn { return "Hold Fn to record, then release to finish. Double-tap Fn or press Fn + Space for hands-free recording." }
-        if preferences.fnBehavior == .hold { return "Hold Control to record, then release to finish. A quick tap starts hands-free recording." }
+        if preferences.fnBehavior == .hold { return "Hold Control to record, then release to finish. Short taps are ignored. Choose Press to toggle for hands-free recording." }
         return "Tap Control to record. Tap again to finish."
     }
     var body: some View {

@@ -151,10 +151,8 @@ final class FnShortcut {
                clock() - pressed >= Self.controlHoldDelay,
                let action = state.thresholdReached() { onAction?(action) }
             if !down {
-                let quickTap = state.behavior == .hold && !state.didTrigger && !state.wasBusy && !state.isChord
                 let action = state.release()
                 if let action { onAction?(action) }
-                else if quickTap { onAction?(.toggle) }
                 controlStartCount = nil
                 controlPressedAt = nil
                 onFnSignal?(false)

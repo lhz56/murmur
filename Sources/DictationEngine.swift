@@ -210,6 +210,14 @@ final class DictationEngine: ObservableObject {
     private var stopRequested = false
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
     let localSpeech = LocalRecognition()
+    private let authorizeMicrophone: () async -> Bool
+
+    init(authorizeMicrophone: @escaping () async -> Bool = {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? true :
+            await AVCaptureDevice.requestAccess(for: .audio)
+    }) {
+        self.authorizeMicrophone = authorizeMicrophone
+    }
 
     private func preparedInput(uid: String) async throws -> AVAudioEngine {
         let device = try Microphones.selected(uid: uid)
@@ -251,6 +259,7 @@ final class DictationEngine: ObservableObject {
 
     private func takePreparedInput(uid: String) async throws -> AVAudioEngine {
         let audio = try await preparedInput(uid: uid)
+        try Task.checkCancellation()
         if preparedEngine === audio { preparedEngine = nil; preparedDevice = nil }
         return audio
     }
@@ -307,12 +316,13 @@ final class DictationEngine: ObservableObject {
         recordedURL = audioURL; selectedEngine = recognitionEngine; selectedLocale = localeID; selectedVocabulary = vocabulary
         selectedMicrophoneUID = microphoneUID
         do {
-            let granted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? true : await AVCaptureDevice.requestAccess(for: .audio)
+            let granted = await authorizeMicrophone()
+            try Task.checkCancellation()
+            guard session == generation, !stopRequested else { throw DictationError.cancelled }
             guard granted else { throw DictationError.microphone }
-            guard session == generation, !stopRequested else { throw DictationError.cancelled }
             var audioEngine = try await takePreparedInput(uid: microphoneUID)
-            inputName = try Microphones.selected(uid: microphoneUID).name
             guard session == generation, !stopRequested else { throw DictationError.cancelled }
+            inputName = try Microphones.selected(uid: microphoneUID).name
             var format = audioEngine.inputNode.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
             let capture = try AudioPipeline(inputFormat: format, audioURL: audioURL, onMeter: { [weak self] level in
@@ -338,6 +348,7 @@ final class DictationEngine: ObservableObject {
                     guard attempt == 0, session == generation, !stopRequested else { throw error }
                     // Device changes can race the tap. Retry once with a new graph.
                     audioEngine = try await takePreparedInput(uid: microphoneUID)
+                    guard session == generation, !stopRequested else { throw DictationError.cancelled }
                     format = audioEngine.inputNode.inputFormat(forBus: 0)
                     guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
                 }
@@ -345,7 +356,7 @@ final class DictationEngine: ObservableObject {
             startedAt = Date()
             clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self, let start = self.startedAt else { return }
+                    guard let self, self.generation == session, let start = self.startedAt else { return }
                     self.elapsed = Date().timeIntervalSince(start)
                 }
             }
@@ -383,6 +394,9 @@ final class DictationEngine: ObservableObject {
             }
             timingLog.info("Microphone ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
         } catch {
+            // A cancelled start can return after the next session has begun.
+            // Only the session that owns the engine may tear it down.
+            guard generation == session else { throw DictationError.cancelled }
             discardPreparedInput()
             await abort()
             throw error
@@ -415,8 +429,7 @@ final class DictationEngine: ObservableObject {
         let requestedAt = ProcessInfo.processInfo.systemUptime
         guard phase == .recording else {
             if phase == .preparing || phase == .downloading {
-                stopRequested = true
-                stopCapture()
+                _ = cancelStartup()
             }
             return false
         }
@@ -507,13 +520,26 @@ final class DictationEngine: ObservableObject {
         engine = nil
     }
 
-    func abort() async {
+    /// Release startup synchronously, even if a permission/device operation
+    /// cannot be cancelled. Flush this session's audio separately from the UI.
+    func cancelStartup() -> Task<InputSignal, Never>? {
+        guard phase == .preparing || phase == .downloading else { return nil }
+        stopRequested = true
+        discardPreparedInput()
+        let capture = releaseSession()
+        let capturedSignal = signal
+        return Task { await capture?.finish() ?? capturedSignal }
+    }
+
+    private func releaseSession() -> AudioPipeline? {
         generation = UUID()
         setupTask?.cancel(); setupTask = nil; recognitionPreparing = false
         clock?.invalidate(); clock = nil
         progressTimer?.invalidate(); progressTimer = nil
+        if let start = startedAt { elapsed = Date().timeIntervalSince(start) }
+        startedAt = nil
         stopCapture()
-        if let pipeline { signal = await pipeline.finish() }
+        let capture = pipeline
         pipeline = nil
         let abandonedAnalyzer = analyzer; analyzer = nil
         resultsTask?.cancel(); resultsTask = nil
@@ -522,6 +548,16 @@ final class DictationEngine: ObservableObject {
         // the recording session now; its generation prevents late results or setup.
         if let abandonedAnalyzer {
             Task { await abandonedAnalyzer.cancelAndFinishNow() }
+        }
+        return capture
+    }
+
+    func abort() async {
+        let capture = releaseSession()
+        let releasedSession = generation
+        if let capture {
+            let finalSignal = await capture.finish()
+            if generation == releasedSession { signal = finalSignal }
         }
     }
 }

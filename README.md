@@ -4,7 +4,7 @@ A native Mac dictation app with local transcription, a searchable recording libr
 
 ## Features
 
-- Hold **Control** to talk; release to stop. A quick tap starts hands-free recording, and another tap finishes it.
+- Hold **Control** to talk; release to stop. Release during startup cancels immediately, and short taps are ignored in hold mode.
 - A floating recording pill with voice animation and start/stop chimes.
 - Automatic clipboard copying and insertion into the original focused text box.
 - Saved transcripts and audio, search, favorites, editing, export, trash, and interrupted-recording recovery.
@@ -48,7 +48,7 @@ For an Apple-only build, skip `Tools/BuildLocalSpeech.sh`, run `./build.sh`, and
 4. Click a text box, hold **Control**, and speak after the start chime. Release to stop capture. Keep the text box focused while transcription finishes.
 5. Murmur saves the recording and transcript, copies the finished text, and pastes it into the original text box. If focus changes or insertion cannot be confirmed, the text remains available in the library and clipboard.
 
-A quick Control tap starts hands-free recording. Tap again to finish, or use **Control + Option + Space**. Settings also offers a toggle key mode and **Fn / Globe** shortcuts. Fn must send a standard Mac Fn event; keys handled entirely inside keyboard firmware cannot trigger Murmur. **Test key** checks the physical signal without recording.
+Choose **Press to toggle** in Settings for hands-free Control recording, or use **Control + Option + Space**. Settings also offers **Fn / Globe** shortcuts. Fn must send a standard Mac Fn event; keys handled entirely inside keyboard firmware cannot trigger Murmur. **Test key** checks the physical signal without recording.
 
 **Test microphone** displays the input level without saving audio. **Test insertion** gives you eight seconds to focus a text box, then inserts a test sentence without recording. Closing the library leaves Murmur in the menu bar; **Command + Q** quits.
 

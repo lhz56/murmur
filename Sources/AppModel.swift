@@ -39,7 +39,7 @@ final class Preferences: ObservableObject {
 
 @MainActor
 final class AppModel: ObservableObject {
-    let speech = DictationEngine()
+    let speech: DictationEngine
     let microphoneCheck = MicrophoneCheck()
     let preferences: Preferences
     let storage: HistoryStorage
@@ -87,16 +87,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var deliveryResult: InsertionResult?
     private var writesEnabled = true
     private var recordingTask: Task<Void, Never>?
+    private var startingID: UUID?
+    private var startupCleanupTasks: [UUID: Task<Void, Never>] = [:]
     private var toastTask: Task<Void, Never>?
     private var editSaveTask: Task<Void, Never>?
     private var hudTask: Task<Void, Never>?
     @Published private(set) var fnHoldInProgress = false
-    private var stopAfterSetup = false
     private var stopRequestedAt: TimeInterval?
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
     private var cachedSounds: [String: NSSound] = [:]
 
-    init(preview: Bool = false) {
+    init(preview: Bool = false, speech engine: DictationEngine? = nil) {
+        self.speech = engine ?? DictationEngine()
         isPreview = preview
         preferences = Preferences(preview: preview)
         let root = preview ? FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-preview-\(UUID().uuidString)") :
@@ -151,6 +153,8 @@ final class AppModel: ObservableObject {
         guard !isTestingFn else { return }
         if speech.phase == .recording {
             queueFinish()
+        } else if startingID != nil {
+            cancelRecordingStartup()
         } else if speech.phase == .idle, activeID == nil {
             recordingTask = Task { await beginRecording() }
         }
@@ -170,24 +174,23 @@ final class AppModel: ObservableObject {
         guard !isTestingFn else { return }
         switch action {
         case .startHold:
-            fnHoldInProgress = true; stopAfterSetup = false
+            fnHoldInProgress = true
             if speech.phase == .idle { toggleRecording() }
         case .finishHold:
             let wasFnHeld = fnHoldInProgress
             fnHoldInProgress = false
             if speech.phase == .recording { toggleRecording() }
             else if speech.phase == .preparing || speech.phase == .downloading || (speech.phase == .idle && wasFnHeld) {
-                stopAfterSetup = true
-                speech.requestStop()
+                cancelRecordingStartup()
             }
         case .toggle:
-            fnHoldInProgress = false; stopAfterSetup = false; toggleRecording()
+            fnHoldInProgress = false; toggleRecording()
         case .latchHold:
-            fnHoldInProgress = false; stopAfterSetup = false
+            fnHoldInProgress = false
         case .cancelHold:
             fnHoldInProgress = false
             if speech.phase == .recording { cancelRecording() }
-            else { stopAfterSetup = true; speech.requestStop() }
+            else { cancelRecordingStartup() }
         }
     }
 
@@ -205,8 +208,8 @@ final class AppModel: ObservableObject {
     }
 
     private func beginRecording() async {
+        guard !Task.isCancelled else { return }
         guard activeID == nil, speech.phase == .idle else { return }
-        if stopAfterSetup { stopAfterSetup = false; fnHoldInProgress = false; return }
         guard writesEnabled else { showWindow?(); return }
         insertionTestTask?.cancel()
         errorMessage = nil
@@ -225,21 +228,21 @@ final class AppModel: ObservableObject {
         filter = .all; search = ""
         guard persist(), let audioURL = storage.audioURL(for: entry) else { activeID = nil; return }
         hudTask?.cancel(); hudMessage = nil; hudVisible = true; showHUD?()
+        startingID = entry.id
         do {
             try await speech.start(audioURL: audioURL, localeID: entry.locale, microphoneUID: preferences.microphoneUID,
                                    recognitionEngine: preferences.recognitionEngine, vocabulary: preferences.vocabulary)
+            guard !Task.isCancelled, activeID == entry.id, startingID == entry.id else { return }
+            startingID = nil
             if let i = index(entry.id) { transcripts[i].microphoneName = speech.inputName }
             onRecordingChanged?(true)
             playSound("start")
-            if stopAfterSetup {
-                stopAfterSetup = false
-                queueFinish()
-                return
-            }
             checkpointTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.checkpoint() }
             }
         } catch {
+            guard activeID == entry.id, startingID == entry.id else { return }
+            startingID = nil
             checkpointTimer?.invalidate(); checkpointTimer = nil
             let cancelled = (error as? DictationError).map { if case .cancelled = $0 { return true }; return false } ?? false
             if cancelled && !speech.signal.hasFrames {
@@ -250,9 +253,39 @@ final class AppModel: ObservableObject {
                 if !FileManager.default.fileExists(atPath: audioURL.path), let i = index(activeID) { transcripts[i].audioFile = nil }
             }
             persist(); activeID = nil
-            fnHoldInProgress = false; stopAfterSetup = false
+            fnHoldInProgress = false
             hudVisible = false; hideHUD?(); onRecordingChanged?(false)
             if !cancelled { errorMessage = error.localizedDescription; showWindow?() }
+        }
+    }
+
+    private func cancelRecordingStartup() {
+        guard startingID != nil || (speech.phase == .idle && activeID == nil) else { return }
+        recordingTask?.cancel()
+        guard let id = startingID, activeID == id else { return }
+        let capturedSignal = speech.signal
+        let cleanup = speech.cancelStartup()
+        startingID = nil; activeID = nil; pasteTarget = nil
+        checkpointTimer?.invalidate(); checkpointTimer = nil
+        hudTask?.cancel(); hudTask = nil; hudMessage = nil; hudVisible = false
+        hideHUD?(); onRecordingChanged?(false)
+        fnHoldInProgress = false
+        if let i = index(id) { transcripts[i].status = .interrupted }
+        persist()
+        startupCleanupTasks[id] = Task { [weak self] in
+            let finalSignal = await cleanup?.value ?? capturedSignal
+            guard let self else { return }
+            defer { self.startupCleanupTasks[id] = nil }
+            guard let i = self.index(id) else { return }
+            let audioURL = self.storage.audioURL(for: self.transcripts[i])
+            if !finalSignal.hasFrames {
+                if let audioURL { try? FileManager.default.removeItem(at: audioURL) }
+                self.transcripts.remove(at: i)
+                if self.selectedID == id { self.selectedID = nil }
+            } else {
+                self.transcripts[i].duration = max(self.transcripts[i].duration, finalSignal.seconds)
+            }
+            self.persist()
         }
     }
 
@@ -306,7 +339,7 @@ final class AppModel: ObservableObject {
         }
         activeID = nil
         stopRequestedAt = nil
-        fnHoldInProgress = false; stopAfterSetup = false
+        fnHoldInProgress = false
         onRecordingChanged?(false)
         let needsReview = transcripts.first { $0.id == id }?.reviewReason != nil
         dismissHUD(message: needsReview ? "Saved · check this thought" : speech.liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No clear speech · audio kept" : errorMessage == nil ? deliveryResult?.hudMessage ?? (preferences.autoCopy ? "Copied · ready to paste" : "Saved · ready to copy") : "Recording kept")
@@ -323,7 +356,7 @@ final class AppModel: ObservableObject {
             playSound("finish")
             updateActive(status: .interrupted)
             persist(); activeID = nil
-            fnHoldInProgress = false; stopAfterSetup = false
+            fnHoldInProgress = false
             onRecordingChanged?(false); dismissHUD(message: "Recording kept")
             notify("Recording kept in your library")
         }
@@ -571,6 +604,7 @@ final class AppModel: ObservableObject {
             checkpoint(); await speech.abort(); updateActive(status: .interrupted); persist(); activeID = nil
         }
         speech.localSpeech.parakeet.stop()
+        for task in Array(startupCleanupTasks.values) { await task.value }
         stopPlayback()
     }
 

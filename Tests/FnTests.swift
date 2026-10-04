@@ -60,25 +60,32 @@ import CoreGraphics
         var controlActions: [FnKeyState.Action] = []
         control.onAction = { controlActions.append($0) }
         control.sampleControl(flags: .maskControl, keyDownCount: 100)
-        assert(controlActions.isEmpty) // Recording starts on an unchorded release.
+        assert(controlActions.isEmpty)
         control.sampleControl(flags: [], keyDownCount: 100)
-        assert(controlActions == [.toggle])
+        assert(controlActions.isEmpty) // Short taps in hold mode never start hands-free recording.
         control.sampleControl(flags: [], keyDownCount: 100)
-        assert(controlActions == [.toggle]) // Polling and local delivery cannot duplicate it.
+        assert(controlActions.isEmpty)
         control.sampleControl(flags: .maskControl, keyDownCount: 100)
         control.sampleControl(flags: .maskControl, keyDownCount: 101)
         control.sampleControl(flags: [], keyDownCount: 101)
-        assert(controlActions == [.toggle]) // Control+C and any normal key chord are ignored.
+        assert(controlActions.isEmpty) // Control+C and any normal key chord are ignored.
         control.sampleControl(flags: [.maskControl, .maskShift], keyDownCount: 101)
         control.sampleControl(flags: [], keyDownCount: 101)
-        assert(controlActions == [.toggle])
+        assert(controlActions.isEmpty)
         control.sampleControl(flags: .maskControl, keyDownCount: 101)
         control.sampleControl(flags: [], keyDownCount: 101)
-        assert(controlActions == [.toggle, .toggle])
+        assert(controlActions.isEmpty)
         control.sampleControl(flags: [], keyDownCount: 101)
         control.sampleControl(flags: .maskControl, keyDownCount: 102)
         control.sampleControl(flags: [], keyDownCount: 102)
-        assert(controlActions == [.toggle, .toggle]) // A whole chord within the first polling interval is ignored.
+        assert(controlActions.isEmpty) // A whole chord within the first polling interval is ignored.
+        control.behavior = { .toggle }
+        control.sampleControl(flags: .maskControl, keyDownCount: 102)
+        control.sampleControl(flags: [], keyDownCount: 102)
+        assert(controlActions == [.toggle]) // Hands-free remains explicitly available in toggle mode.
+        control.sampleControl(flags: [], keyDownCount: 102)
+        assert(controlActions == [.toggle])
+        control.behavior = { .hold }
         control.resetInput(); controlActions = []
         control.sampleControl(flags: .maskControl, keyDownCount: 102)
         controlTime += FnShortcut.controlHoldDelay + 0.001
@@ -141,6 +148,6 @@ import CoreGraphics
         print("PASS: Fn hold/release, short taps, autorepeat, normal Fn chords, Fn+Space, latching, hands-free stop, toggle mode")
         print("PASS: Fn+Space event decoding without Fn-down, repeat suppression, key releases, and hands-free stop")
         print("PASS: Fn double-tap hands-free start, release latching, stop gesture, timing, and actual-signal callbacks")
-        print("PASS: Control hold/release, quick-tap hands-free, immediate release, global modifier polling, duplicate suppression, and early/late Control chords")
+        print("PASS: Control hold/release, ignored short taps, explicit toggle mode, immediate release, global modifier polling, duplicate suppression, and early/late Control chords")
     }
 }
