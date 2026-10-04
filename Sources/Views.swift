@@ -329,7 +329,7 @@ struct TranscriptRow: View {
                     Text(entry.createdAt.formatted(.dateTime.hour().minute()))
                     Text("·"); Text(entry.durationLabel); Text("·"); Text(entry.sourceApp)
                     if entry.status == .interrupted || entry.status == .failed {
-                        Text("· Audio kept").foregroundStyle(Palette.muted)
+                        Text(entry.audioFile == nil ? "· No audio captured" : "· Audio kept").foregroundStyle(Palette.muted)
                     }
                 }.font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1)
             }.frame(maxWidth: .infinity, alignment: .leading)
@@ -394,10 +394,10 @@ struct TranscriptDetail: View {
                     Text(entry.durationLabel).font(.system(size: 10)).monospacedDigit().foregroundStyle(Palette.muted)
                 }.padding(.horizontal, 8).padding(.vertical, 6).background(Palette.sidebar.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
             }
-            if entry.status == .failed || entry.status == .interrupted || entry.reviewReason != nil {
+            if entry.deletedAt == nil && (entry.status == .failed || entry.status == .interrupted || entry.reviewReason != nil) {
                 if entry.audioFile != nil {
                     Button { model.retry(entry) } label: { Label("Transcribe saved audio", systemImage: "arrow.clockwise") }
-                        .buttonStyle(CapsuleButtonStyle()).disabled(model.speech.phase.isBusy)
+                        .buttonStyle(CapsuleButtonStyle()).disabled(model.speech.phase.isBusy || model.activeID != nil)
                 } else {
                     Text("No audio was captured. Check microphone access before recording again.").font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
@@ -430,6 +430,7 @@ struct TranscriptDetail: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Delete permanently", role: .destructive) { model.permanentlyDelete(entry.id) }
             } message: { Text("This removes the transcript and its saved audio from Murmur.") }
+            .onChange(of: entry.id) { _, _ in showOriginal = false; confirmDelete = false }
     }
     private func editorHeight(available: CGFloat) -> CGFloat {
         var controls: CGFloat = 242

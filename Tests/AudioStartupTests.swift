@@ -1,5 +1,6 @@
 import Foundation
 import AVFAudio
+import Speech
 
 @main struct AudioStartupTests {
     static func main() async throws {
@@ -46,6 +47,40 @@ import AVFAudio
         let saved = try AVAudioFile(forReading: root.appendingPathComponent("frames.m4a"))
         assert(saved.length == 2048)
 
+        let preview = AsyncStream<Speech.AnalyzerInput>.makeStream()
+        let fallbackURL = root.appendingPathComponent("fallback.m4a")
+        let fallback = try AudioPipeline(inputFormat: format, audioURL: fallbackURL,
+            onMeter: { _ in }, onError: { assertionFailure($0.localizedDescription) }, onPreviewError: { _ in })
+        fallback.append(buffer)
+        try await fallback.attach(target: format, stream: preview.continuation)
+        await fallback.discardPreviewBuffers()
+        if case .terminated = preview.continuation.yield(Speech.AnalyzerInput(buffer: buffer)) { }
+        else { assertionFailure("Discarded preview did not close its stream") }
+        fallback.append(buffer)
+        let fallbackSignal = await fallback.finish()
+        assert(fallbackSignal.samples == 2048)
+        let fallbackFile = try AVAudioFile(forReading: fallbackURL)
+        assert(fallbackFile.length == 2048)
+        let waveURL = root.appendingPathComponent("full-tail.wav")
+        try AudioFileConversion.writeWave(fallbackURL, to: waveURL)
+        let waveFile = try AVAudioFile(forReading: waveURL)
+        assert(abs(Double(waveFile.length) - Double(fallbackFile.length) / 3) <= 2,
+               "Resampling must flush the final audio samples")
+
+        // A delayed preview crossing its memory bound must keep saving all
+        // microphone frames for the final recognizer. No real-time wait is used.
+        let longURL = root.appendingPathComponent("delayed-preview.m4a")
+        let delayed = try AudioPipeline(inputFormat: format, audioURL: longURL,
+            onMeter: { _ in }, onError: { assertionFailure($0.localizedDescription) }, onPreviewError: { _ in })
+        let long = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48000 * 121)!
+        long.frameLength = long.frameCapacity
+        long.floatChannelData![0].initialize(repeating: 0, count: Int(long.frameLength))
+        delayed.append(long); delayed.append(buffer)
+        let delayedSignal = await delayed.finish()
+        assert(delayedSignal.samples == Int(long.frameLength) + 1024)
+        let delayedFile = try AVAudioFile(forReading: longURL)
+        assert(delayedFile.length == Int64(delayedSignal.samples))
+
         // A real native exception must become a Swift error, not strand a start.
         // Tapping a mixer uses no microphone, and a second tap on its occupied
         // bus is invalid on every supported engine.
@@ -56,5 +91,6 @@ import AVFAudio
         mixer.removeTap(onBus: 0)
         print("PASS: first-frame readiness handles early frames, concurrent delivery, timeout, cancellation, and sealed capture")
         print("PASS: readiness preserves complete saved audio and native tap exceptions return ordinary errors")
+        print("PASS: discarded or delayed previews cannot stop saving complete microphone audio")
     }
 }

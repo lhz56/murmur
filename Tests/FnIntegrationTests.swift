@@ -137,7 +137,21 @@ import CoreGraphics
         assert(savedHistory.count == savedCount)
         let cancelledAudio = (try? FileManager.default.contentsOfDirectory(atPath: delayedRoot.appendingPathComponent("Recordings").path)) ?? []
         assert(cancelledAudio.isEmpty)
-        control.stop()
+        control.resetInput()
+        hold()
+        try await waitFor { authorization.requests.count == 4 }
+        delayedModel.cancelRecording() // Escape while the startup pill is visible.
+        assert(delayedSpeech.phase == .idle && !delayedModel.hudVisible && delayedModel.activeID == nil)
+        release()
+        authorization.requests[3].resume(returning: true)
+        try await waitFor { delayedModel.transcripts.count == savedCount }
+
+        hold()
+        try await waitFor { authorization.requests.count == 5 }
+        control.stop() // Reconfiguring the key must not strand a held startup.
+        assert(delayedSpeech.phase == .idle && !delayedModel.hudVisible && delayedModel.activeID == nil)
+        authorization.requests[4].resume(returning: true)
+        try await waitFor { delayedModel.transcripts.count == savedCount }
         print("PASS: physical-key test routes hold and hands-free actions without starting speech, audio capture, or a transcript")
         print("PASS: release stops synchronously; release before startup never captures audio or creates a transcript")
         print("PASS: release hides startup and frees the app before slow microphone setup returns")

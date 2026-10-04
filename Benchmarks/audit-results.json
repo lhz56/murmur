@@ -1,0 +1,77 @@
+{
+  "date": "2026-10-04",
+  "machine": "Apple silicon Mac16,10",
+  "system": "macOS 26.3",
+  "sdk": "macOS 26.4",
+  "baselineCommit": "ba0d394",
+  "result": "passed within the recorded scope",
+  "fixes": [
+    "Reserve saved-audio retries synchronously, reject overlapping requests and retries from Trash, and preserve edited text while recognition is pending.",
+    "Preserve failed, empty and review-needed audio when successful-audio retention is disabled.",
+    "Protect active recordings from permanent deletion and roll back only newly created unsaved placeholders or failed imports.",
+    "Replace a storage initialization crash with an actionable error and prevent writes to unavailable or unsupported history.",
+    "Recover a missing primary history from its backup and preserve damaged history with unique recovery filenames.",
+    "Finish an active hold when its shortcut hook stops or is interrupted, and require physical release before another hold can start.",
+    "Allow Escape to cancel Getting ready before recording starts.",
+    "Keep saved microphone audio flowing after optional preview failure or preview-buffer exhaustion.",
+    "Bound recognition waits and prevent cancelled or late framework operations from changing a newer session.",
+    "Cancel individual Parakeet waiters and requests, ignore stale request errors, cancel completed request deadlines, and update readiness after helper failure.",
+    "Propagate Whisper cancellation to its detached operation and terminate its owned helper process.",
+    "Stop capture, flush interrupted audio and cancel recognition promptly when quitting.",
+    "Balance retained Core Audio device strings and make audio-file conversion loops cancellable.",
+    "Reset detail-view state when changing transcripts and report an empty retry as no words heard rather than successful transcription."
+  ],
+  "automated": {
+    "command": "./test.sh",
+    "exitCode": 0,
+    "suitesPassed": [
+      "StorageTests",
+      "FnTests",
+      "TextInsertionTests",
+      "FnIntegrationTests",
+      "LibraryStateTests",
+      "AudioStartupTests",
+      "WorkerLifecycleTests",
+      "SpeechDeadlineTests"
+    ],
+    "coverage": [
+      "Control/Fn gestures, chords, quick release, delayed authorization, Escape during startup, hook interruption and disable during hold",
+      "Retry reservation, overlap prevention, retention, edited-text isolation, active deletion protection, Trash restrictions and quit during queued retry",
+      "Missing-primary backup recovery, atomic history, unavailable storage and byte-preserving unsupported-version handling",
+      "First-buffer readiness, startup timeout/cancellation, sealed capture, native tap exception recovery, 121-second preview exhaustion with full saved audio and resampling tail preservation",
+      "Shared worker startup, independent cancellation, ignored late errors, matched queued responses, timeout recovery, crash recovery and readiness reset",
+      "Uncooperative operation timeout, prompt cancellation and late-completion isolation",
+      "UTF-16 selection replacement, changed focus, secure/read-only/control exclusion and single paste dispatch"
+    ]
+  },
+  "generatedSpeechFixtures": {
+    "CaptureTests": "passed: Apple recognition, delayed preview, actual hardware format, full saved audio, 16-kHz conversion, first/last words, confidence and microphone discovery",
+    "LocalEngineTests": "passed: real bundled Parakeet and Whisper recognition with first/last words and matched queued Parakeet responses",
+    "LibraryTests": "passed: saved-audio recovery, completed recognition, search, favorites, debounced editing, original text, trash/restore and cleanup of temporary test-owned data",
+    "personalAudioIncluded": false
+  },
+  "installedApp": {
+    "signedBuildAndStrictVerificationPassed": true,
+    "persistentSigningIdentityReused": true,
+    "realEarPodsCapturePassed": true,
+    "successfulAudioRemovedWithRetentionDisabled": true,
+    "interruptedAudioKeptWithRetentionDisabled": true,
+    "quitDuringRecordingAndReopenRecoveryPassed": true,
+    "repeatedRetryClickDidNotCreateAdditionalEntry": true,
+    "emptyRetryMessageAndAudioRecoveryPassed": true,
+    "nativeTextFieldReceivedExactTestText": true,
+    "selectedUnicodeTextReplacedExactly": true,
+    "nativeMultilineEditorReceivedExactTestText": true,
+    "nativeMultilinePasteCalls": 1,
+    "microphoneAndAccessibilityUsableAfterRelaunch": true,
+    "originalClipboardInsertionAndRetentionPreferencesRestored": true,
+    "auditRecordingsMovedToRecoverableTrash": true
+  },
+  "limitations": [
+    "One development Mac and one selected physical microphone were exercised.",
+    "Generated speech fixtures establish pipeline behavior, not accuracy for every speaker, language or acoustic environment.",
+    "Installed native editor checks supplement focused compatibility tests; they do not establish compatibility with every application or website.",
+    "Initial model installation, long recordings, hardware changes and destination-app behavior can affect timing.",
+    "A passing audit does not establish that the app is free of every possible bug."
+  ]
+}

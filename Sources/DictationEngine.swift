@@ -87,6 +87,7 @@ final class AudioPipeline: @unchecked Sendable {
     private var finished = false
     let onMeter: (Float) -> Void
     let onError: (Error) -> Void
+    private let onPreviewError: (Error) -> Void
     var onSignal: ((InputSignal) -> Void)?
     let firstAudio = FirstAudioBuffer()
 
@@ -100,8 +101,10 @@ final class AudioPipeline: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    init(inputFormat: AVAudioFormat, audioURL: URL, onMeter: @escaping (Float) -> Void, onError: @escaping (Error) -> Void) throws {
+    init(inputFormat: AVAudioFormat, audioURL: URL, onMeter: @escaping (Float) -> Void, onError: @escaping (Error) -> Void,
+         onPreviewError: ((Error) -> Void)? = nil) throws {
         self.onMeter = onMeter; self.onError = onError
+        self.onPreviewError = onPreviewError ?? onError
         self.audioURL = audioURL; self.expectedInputFormat = inputFormat
     }
 
@@ -134,8 +137,14 @@ final class AudioPipeline: @unchecked Sendable {
 
     func discardPreviewBuffers() async {
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            queue.async { [self] in pending.removeAll(); pendingSeconds = 0; buffering = false; done.resume() }
+            queue.async { [self] in disablePreview(); done.resume() }
         }
+    }
+
+    private func disablePreview() {
+        continuation?.finish(); continuation = nil
+        converter = nil; targetFormat = nil
+        pending.removeAll(); pendingSeconds = 0; buffering = false
     }
 
     private func convert(_ copy: AVAudioPCMBuffer) throws {
@@ -174,11 +183,18 @@ final class AudioPipeline: @unchecked Sendable {
             do {
                 if file == nil { try openFile(copy.format) }
                 try file?.write(from: copy)
-                if converter != nil { try convert(copy) }
-                else if buffering {
-                    pendingSeconds += Double(copy.frameLength) / copy.format.sampleRate
-                    if pendingSeconds > 120 { throw DictationError.setupDelay }
-                    pending.append(copy)
+                do {
+                    if converter != nil { try convert(copy) }
+                    else if buffering {
+                        pendingSeconds += Double(copy.frameLength) / copy.format.sampleRate
+                        if pendingSeconds > 120 { throw DictationError.setupDelay }
+                        pending.append(copy)
+                    }
+                } catch {
+                    // Losing an optional live preview must never seal the saved
+                    // microphone audio needed by the final local recognizer.
+                    disablePreview()
+                    DispatchQueue.main.async { self.onPreviewError(error) }
                 }
                 signal.observe(copy)
                 let now = Date.timeIntervalSinceReferenceDate
@@ -248,9 +264,12 @@ final class DictationEngine: ObservableObject {
     private var selectedLocale = "en-US"
     private var selectedVocabulary = ""
     private var stopRequested = false
+    private var captureError: Error?
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
     let localSpeech = LocalRecognition()
     private let authorizeMicrophone: () async -> Bool
+    var finalizationTimeout: Duration = .seconds(30)
+    var fileRecognitionTimeout: Duration = .seconds(180)
 
     init(authorizeMicrophone: @escaping () async -> Bool = {
         AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? true :
@@ -327,26 +346,37 @@ final class DictationEngine: ObservableObject {
         supportedLanguages = await SpeechTranscriber.supportedLocales.sorted { $0.identifier < $1.identifier }
     }
 
-    private func makeTranscriber(localeID: String) async throws -> SpeechTranscriber {
+    private func checkSession(_ session: UUID) throws {
+        try Task.checkCancellation()
+        guard generation == session else { throw DictationError.cancelled }
+    }
+
+    private func makeTranscriber(localeID: String, session: UUID) async throws -> SpeechTranscriber {
         guard SpeechTranscriber.isAvailable else { throw DictationError.unavailable }
         guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: localeID)) else {
             throw DictationError.unsupportedLanguage
         }
+        try checkSession(session)
         // Keep live provisional text without fastResults, which trades away recognition accuracy.
         let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [],
                                             reportingOptions: [.volatileResults], attributeOptions: [.transcriptionConfidence])
-        try Task.checkCancellation()
+        try checkSession(session)
         try await AssetInventory.reserve(locale: locale)
-        try Task.checkCancellation()
+        try checkSession(session)
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-            try Task.checkCancellation()
+            try checkSession(session)
             if phase != .recording && phase != .finishing { phase = .downloading }
             downloadProgress = 0
-            progressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.downloadProgress = request.progress.fractionCompleted }
+            let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard self?.generation == session else { return }
+                    self?.downloadProgress = request.progress.fractionCompleted
+                }
             }
-            defer { progressTimer?.invalidate(); progressTimer = nil }
+            progressTimer = timer
+            defer { timer.invalidate(); if progressTimer === timer { progressTimer = nil } }
             try await request.downloadAndInstall()
+            try checkSession(session)
         }
         return transcriber
     }
@@ -360,6 +390,7 @@ final class DictationEngine: ObservableObject {
         finalized = ""; volatile = ""; liveText = ""; elapsed = 0; level = 0
         signal = InputSignal(); confidence = nil
         stopRequested = false
+        captureError = nil
         recordedURL = audioURL; selectedEngine = recognitionEngine; selectedLocale = localeID; selectedVocabulary = vocabulary
         selectedMicrophoneUID = microphoneUID
         do {
@@ -378,7 +409,11 @@ final class DictationEngine: ObservableObject {
                 self?.level = level
             }, onError: { [weak self] error in
                 guard self?.generation == session else { return }
+                self?.captureError = error
                 self?.onError?(error)
+            }, onPreviewError: { [weak self] error in
+                guard self?.generation == session else { return }
+                if recognitionEngine == .apple { self?.onError?(error) }
             })
             capture.onSignal = { [weak self] value in
                 guard self?.generation == session else { return }; self?.signal = value
@@ -419,6 +454,7 @@ final class DictationEngine: ObservableObject {
             // The start cue is emitted by the app only after actual microphone frames arrive.
             try await capture.firstAudio.wait()
             guard session == generation, !stopRequested, !Task.isCancelled else { throw DictationError.cancelled }
+            if let captureError { throw captureError }
             phase = .recording
             recognitionPreparing = true
             // Start the preview after microphone readiness, so its setup cannot delay the cue.
@@ -426,7 +462,7 @@ final class DictationEngine: ObservableObject {
                 guard let self else { return }
                 defer { if self.generation == session { self.recognitionPreparing = false } }
                 do {
-                    let transcriber = try await self.makeTranscriber(localeID: localeID)
+                    let transcriber = try await self.makeTranscriber(localeID: localeID, session: session)
                     guard self.generation == session, !Task.isCancelled else { throw DictationError.cancelled }
                     guard let target = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: format) else { throw DictationError.conversion }
                     let stream = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .unbounded)
@@ -501,38 +537,50 @@ final class DictationEngine: ObservableObject {
     func stop() async throws -> String {
         if phase == .recording { requestStop() }
         guard phase == .finishing else { return liveText }
+        if selectedEngine != .apple, recordedURL != nil { generation = UUID() }
+        let session = generation
         do {
             if selectedEngine != .apple, let url = recordedURL {
                 // The final model needs only the saved audio. Never hold it up
                 // while Apple's provisional preview finishes or downloads.
-                generation = UUID()
                 setupTask?.cancel(); setupTask = nil; recognitionPreparing = false
                 let preview = analyzer; analyzer = nil
                 resultsTask?.cancel(); resultsTask = nil
                 if let preview { Task { await preview.cancelAndFinishNow() } }
-                if let capture = pipeline { signal = await capture.finish() }
+                if let capture = pipeline {
+                    let value = await capture.finish(); try checkSession(session); signal = value
+                }
                 pipeline = nil
                 let result = try await localSpeech.transcribe(url, engine: selectedEngine, locale: selectedLocale, vocabulary: selectedVocabulary)
+                try checkSession(session)
                 liveText = result.text; confidence = result.confidence
             } else {
-                try await setupTask?.value; setupTask = nil
-                if let capture = pipeline { signal = await capture.finish() }
-                pipeline = nil
-                try await analyzer?.finalizeAndFinishThroughEndOfInput()
-                try await resultsTask?.value
-                liveText = finalized + volatile
+                let text = try await SpeechDeadline.run(timeout: finalizationTimeout) { [self] in
+                    try await setupTask?.value; try checkSession(session); setupTask = nil
+                    if let capture = pipeline {
+                        let value = await capture.finish(); try checkSession(session); signal = value
+                    }
+                    pipeline = nil
+                    try await analyzer?.finalizeAndFinishThroughEndOfInput(); try checkSession(session)
+                    try await resultsTask?.value; try checkSession(session)
+                    return finalized + volatile
+                }
+                try checkSession(session); liveText = text
             }
+            try checkSession(session)
             onText?(liveText)
             analyzer = nil; resultsTask = nil
             phase = .idle; level = 0
             return liveText
         } catch {
+            guard generation == session else { throw DictationError.cancelled }
             await abort()
             throw error
         }
     }
 
     func transcribeFile(_ url: URL, localeID: String, recognitionEngine: RecognitionEngine = .apple, vocabulary: String = "") async throws -> String {
+        try Task.checkCancellation()
         guard phase == .idle else { throw DictationError.unavailable }
         phase = .preparing
         generation = UUID()
@@ -540,30 +588,42 @@ final class DictationEngine: ObservableObject {
         finalized = ""; volatile = ""; liveText = ""; elapsed = 0
         confidence = nil
         do {
-            signal = try await Task.detached { try AudioFileConversion.signal(url) }.value
-            if recognitionEngine != .apple {
+            return try await SpeechDeadline.run(timeout: fileRecognitionTimeout) { [self] in
+                let scan = Task.detached { try AudioFileConversion.signal(url) }
+                let value = try await withTaskCancellationHandler { try await scan.value } onCancel: { scan.cancel() }
+                try checkSession(session); signal = value
+                if recognitionEngine != .apple {
+                    let file = try AVAudioFile(forReading: url)
+                    elapsed = Double(file.length) / file.processingFormat.sampleRate
+                    phase = .finishing
+                    let result = try await localSpeech.transcribe(url, engine: recognitionEngine, locale: localeID, vocabulary: vocabulary)
+                    try checkSession(session)
+                    liveText = result.text; confidence = result.confidence; phase = .idle
+                    return result.text
+                }
+                let transcriber = try await makeTranscriber(localeID: localeID, session: session)
+                try checkSession(session)
                 let file = try AVAudioFile(forReading: url)
                 elapsed = Double(file.length) / file.processingFormat.sampleRate
+                let speechAnalyzer = SpeechAnalyzer(modules: [transcriber])
+                analyzer = speechAnalyzer
+                observeResults(transcriber, session: session)
                 phase = .finishing
-                let result = try await localSpeech.transcribe(url, engine: recognitionEngine, locale: localeID, vocabulary: vocabulary)
-                liveText = result.text; confidence = result.confidence; phase = .idle
-                return result.text
+                if let last = try await speechAnalyzer.analyzeSequence(from: file) {
+                    try checkSession(session)
+                    try await speechAnalyzer.finalizeAndFinish(through: last)
+                } else { await speechAnalyzer.cancelAndFinishNow() }
+                try checkSession(session)
+                try await resultsTask?.value
+                try checkSession(session)
+                let text = finalized + volatile
+                phase = .idle; analyzer = nil; resultsTask = nil
+                return text
             }
-            let transcriber = try await makeTranscriber(localeID: localeID)
-            let file = try AVAudioFile(forReading: url)
-            elapsed = Double(file.length) / file.processingFormat.sampleRate
-            let speechAnalyzer = SpeechAnalyzer(modules: [transcriber])
-            analyzer = speechAnalyzer
-            observeResults(transcriber, session: session)
-            phase = .finishing
-            if let last = try await speechAnalyzer.analyzeSequence(from: file) {
-                try await speechAnalyzer.finalizeAndFinish(through: last)
-            } else { await speechAnalyzer.cancelAndFinishNow() }
-            try await resultsTask?.value
-            let text = finalized + volatile
-            phase = .idle; analyzer = nil; resultsTask = nil
-            return text
-        } catch { await abort(); throw error }
+        } catch {
+            guard generation == session else { throw DictationError.cancelled }
+            await abort(); throw error
+        }
     }
 
     private func stopCapture(reuse: Bool = false) {

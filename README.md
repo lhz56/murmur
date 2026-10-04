@@ -56,6 +56,10 @@ The floating pill does not take keyboard focus. Capture stops synchronously on k
 
 The recording cue follows the first copied microphone buffer, without waiting for disk writes or meter updates. Murmur prepares a stopped microphone graph ahead of use and reuses it after recording; it captures no audio while idle. Input taps use the microphone's current hardware format. A small Objective-C bridge converts native tap exceptions into recoverable errors because Swift cannot catch those exceptions directly.
 
+Escape cancels startup as well as active recording. Disabling or restarting the shortcut hook finishes an active hold and waits for the physical key to be released before accepting another hold. Saved-audio retries reserve the recording immediately, so repeated clicks cannot start overlapping jobs or replace another recording's text. Restore a recording from Trash before retrying it.
+
+Quitting stops capture, flushes unfinished audio, and cancels recognition instead of waiting for a model to finish. Local worker requests can be cancelled independently; late results cannot update a newer recording. Recognition has bounded waits: 30 seconds for Apple recording finalization, 180 seconds for audio-file jobs, and 120 seconds for a Parakeet recognition request. A timeout preserves the recording for another attempt. Losing an optional live preview does not stop the saved-audio capture used by Parakeet and Whisper.
+
 In four installed-app EarPods tests, recording setup took 0.33–0.51 seconds from the app's start request to its cue, and microphone stops took 25–63 ms. These are local measurements, not guarantees; the Control gesture adds a 100-ms chord-detection delay. [Measurement scope and regression checks](Benchmarks/startup-results.json).
 
 ## Storage and privacy
@@ -68,23 +72,25 @@ history.backup.json      Last successful history snapshot
 Recordings/              Original audio files
 ```
 
-History writes are atomic and checkpointed during recording. Interrupted sessions keep recoverable audio. Retention settings can remove audio after successful transcription; existing and unfinished recordings remain available.
+History writes are atomic and checkpointed during recording. A missing primary history file can recover from its backup. Interrupted sessions keep recoverable audio. With **Save audio** off, Murmur removes audio only after a nonempty transcription that does not need review; failed, empty, and uncertain recordings keep their audio. An unavailable storage folder or an unsupported history version produces a recoverable error and blocks library changes rather than crashing or overwriting the existing files.
 
 Automatic insertion uses the clipboard and Accessibility permission. Murmur resolves focused editor children to their editable parent and captures the destination at recording start. It waits for shortcut modifiers to release, checks the foreground app, window, editor, and clipboard, then invokes the app's standard Paste menu command when available. Otherwise it sends one complete Command-V key sequence. Custom editors without a usable accessibility text node can receive Paste while their original focus or known window remains unchanged. Secure input, disabled controls, and clearly non-text controls are excluded. Murmur never presses Enter or retries an unconfirmed paste. Settings shows whether insertion was confirmed, Paste was sent without confirmation, or text was only copied. Recordings are not uploaded. Initial model downloads come from Apple's system service or public model repositories.
 
 ## Verification
 
-Run the storage, text processing, Control/Fn shortcut, selection replacement, and recording-state checks:
+Run the storage, text processing, Control/Fn shortcut, selection replacement, recording-state, worker cancellation, and recognition-deadline checks:
 
 ```sh
 ./test.sh
 ```
 
-Additional tests under `Tests/` exercise local audio-file recognition, buffered capture, saved-audio recovery, local workers, and latency using speech fixtures. These require the corresponding helpers, models, and system permissions.
+The standard suite also checks overlapping retries, audio retention, unavailable storage, quit during a queued retry, preview failure with continued capture, and worker timeout/crash recovery. Additional tests under `Tests/` exercise actual local audio-file recognition, buffered capture, saved-audio recovery, and latency using generated speech fixtures. These require the corresponding helpers, models, and system permissions.
 
 `Tools/Compatibility/` contains local browser and AppKit editor fixtures for checking exact received text and duplicate paste events. These supplement real destination-app checks; they do not establish compatibility with every application.
 
-Native checks on the development Mac verified microphone input, automatic insertion into an AppKit text field, replacement of selected text, clipboard matching, and retained Microphone/Accessibility permissions after a full quit and relaunch. `Benchmarks/latency-results.json` records limited local measurements, including model preparation and repeated start/stop cycles. Those measurements do not guarantee accuracy, timing, or insertion compatibility across every Mac or destination app. Personal recordings and their recognition comparisons are excluded from this repository.
+The [October 4 audit](Benchmarks/audit-results.json) passed the standard suite and generated speech fixtures through Apple, Parakeet, and Whisper, preserving the fixture's first and last words. Installed-app checks verified real microphone capture, audio retention with **Save audio** off, quit/reopen recovery, native text-field insertion, replacement of selected Unicode text, and exactly one Paste call in a native multiline editor. Microphone and Accessibility permissions remained usable after the signed update and relaunch. Recording preferences were restored after these checks.
+
+`Benchmarks/latency-results.json` records limited local measurements, including model preparation and repeated start/stop cycles. These checks do not guarantee accuracy, timing, absence of every bug, or insertion compatibility across every Mac or destination app. Personal recordings and their recognition comparisons are excluded from this repository.
 
 ## Third-party components
 

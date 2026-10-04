@@ -42,7 +42,7 @@ final class HistoryStorage {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init(root: URL) throws {
+    init(unpreparedRoot root: URL) {
         self.root = root
         audioDirectory = root.appendingPathComponent("Recordings", isDirectory: true)
         historyURL = root.appendingPathComponent("history.json")
@@ -50,20 +50,31 @@ final class HistoryStorage {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
+    }
+
+    convenience init(root: URL) throws {
+        self.init(unpreparedRoot: root)
         try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true)
     }
 
     func load() throws -> [Transcript] {
-        guard FileManager.default.fileExists(atPath: historyURL.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: historyURL.path) else {
+            guard FileManager.default.fileExists(atPath: backupURL.path) else { return [] }
+            return try recover(decoder.decode(HistoryDocument.self, from: Data(contentsOf: backupURL)))
+        }
         let document: HistoryDocument
         do {
             document = try decoder.decode(HistoryDocument.self, from: Data(contentsOf: historyURL))
         } catch {
             // Preserve the damaged file for recovery instead of silently replacing it.
-            let recovery = root.appendingPathComponent("history-damaged-\(Int(Date().timeIntervalSince1970)).json")
+            let recovery = root.appendingPathComponent("history-damaged-\(UUID().uuidString).json")
             try? FileManager.default.copyItem(at: historyURL, to: recovery)
             document = try decoder.decode(HistoryDocument.self, from: Data(contentsOf: backupURL))
         }
+        return try recover(document)
+    }
+
+    private func recover(_ document: HistoryDocument) throws -> [Transcript] {
         guard document.version == 1 else { throw StorageError.newerFormat }
         return document.transcripts.map { entry in
             var recovered = entry

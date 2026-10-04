@@ -30,6 +30,11 @@ import Foundation
         try store.save(fallback)
         let restored = try store.load()
         assert(restored.count == 1)
+        try FileManager.default.removeItem(at: store.historyURL)
+        let missingPrimary = try store.load()
+        assert(missingPrimary.count == 1 && missingPrimary[0].id == first.id,
+               "A missing primary history must recover the last-good backup")
+        try store.save(missingPrimary)
         var unsafe = first; unsafe.audioFile = "../../secret"
         assert(store.audioURL(for: unsafe) == nil)
         assert(TextTools.clean("  Hello\t  world.  ") == "Hello world.")

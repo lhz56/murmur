@@ -86,6 +86,7 @@ final class AppModel: ObservableObject {
     private var insertionTestTask: Task<Void, Never>?
     @Published private(set) var deliveryResult: InsertionResult?
     private var writesEnabled = true
+    private var historyFailure: String?
     private var recordingTask: Task<Void, Never>?
     private var startingID: UUID?
     private var startupCleanupTasks: [UUID: Task<Void, Never>] = [:]
@@ -97,26 +98,41 @@ final class AppModel: ObservableObject {
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
     private var cachedSounds: [String: NSSound] = [:]
 
-    init(preview: Bool = false, speech engine: DictationEngine? = nil) {
+    init(preview: Bool = false, speech engine: DictationEngine? = nil, storageRoot: URL? = nil) {
         self.speech = engine ?? DictationEngine()
         isPreview = preview
         preferences = Preferences(preview: preview)
-        let root = preview ? FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-preview-\(UUID().uuidString)") :
-            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Murmur", isDirectory: true)
+        let root = storageRoot ?? (preview ? FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-preview-\(UUID().uuidString)") :
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Murmur", isDirectory: true))
         do { storage = try HistoryStorage(root: root) }
-        catch { fatalError("Cannot create Murmur’s storage folder: \(error.localizedDescription)") }
-        do { transcripts = try storage.load(); try storage.save(transcripts) }
-        catch { writesEnabled = false; errorMessage = "History couldn’t be opened. Your files have been preserved at \(root.path). \(error.localizedDescription)" }
+        catch {
+            storage = HistoryStorage(unpreparedRoot: root)
+            writesEnabled = false
+            historyFailure = "Murmur couldn’t open its storage folder. Your files have been preserved at \(root.path). \(error.localizedDescription)"
+            errorMessage = historyFailure
+        }
+        if writesEnabled {
+            do { transcripts = try storage.load(); try storage.save(transcripts) }
+            catch {
+                writesEnabled = false
+                historyFailure = "History couldn’t be opened. Your files have been preserved at \(root.path). \(error.localizedDescription)"
+                errorMessage = historyFailure
+            }
+        }
         speech.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         microphoneCheck.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         preferences.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
-        speech.onText = { [weak self] text in self?.updateActive(text: text) }
+        speech.onText = { [weak self] text in
+            guard let self, let entry = self.selectedActive, entry.status == .recording else { return }
+            self.updateActive(text: text)
+        }
         speech.onError = { [weak self] error in
             guard let self else { return }
             self.errorMessage = error.localizedDescription
             if self.speech.phase == .recording { self.toggleRecording() }
         }
-        if preview { seedPreview() }
+        speech.localSpeech.parakeet.onReadiness = { [weak self] ready in self?.parakeetReady = ready }
+        if preview && storageRoot == nil { seedPreview() }
         Task { await speech.refreshLanguages() }
         if !preview { Task { await speech.warmMicrophone(uid: preferences.microphoneUID) } }
         preferences.$microphoneUID.dropFirst().sink { [weak self] uid in
@@ -140,6 +156,7 @@ final class AppModel: ObservableObject {
     var wordCount: Int { savedTranscripts.reduce(0) { $0 + $1.wordCount } }
     var totalDuration: TimeInterval { savedTranscripts.reduce(0) { $0 + $1.duration } }
     var selected: Transcript? { transcripts.first { $0.id == selectedID } }
+    private var selectedActive: Transcript? { transcripts.first { $0.id == activeID } }
     var recordingTime: String { String(format: "%02d:%02d", Int(speech.elapsed) / 60, Int(speech.elapsed) % 60) }
 
     @discardableResult
@@ -147,6 +164,11 @@ final class AppModel: ObservableObject {
         guard writesEnabled else { return false }
         do { try storage.save(transcripts); return true }
         catch { errorMessage = "Couldn’t save history: \(error.localizedDescription). The audio remains in your Murmur folder."; return false }
+    }
+
+    private func requireWritableLibrary() -> Bool {
+        guard writesEnabled else { errorMessage = historyFailure; return false }
+        return true
     }
 
     func toggleRecording() {
@@ -210,7 +232,7 @@ final class AppModel: ObservableObject {
     private func beginRecording() async {
         guard !Task.isCancelled else { return }
         guard activeID == nil, speech.phase == .idle else { return }
-        guard writesEnabled else { showWindow?(); return }
+        guard requireWritableLibrary() else { showWindow?(); return }
         let requestedAt = ProcessInfo.processInfo.systemUptime
         insertionTestTask?.cancel()
         errorMessage = nil
@@ -227,7 +249,11 @@ final class AppModel: ObservableObject {
         activeID = entry.id
         selectedID = entry.id
         filter = .all; search = ""
-        guard persist(), let audioURL = storage.audioURL(for: entry) else { activeID = nil; return }
+        guard persist(), let audioURL = storage.audioURL(for: entry) else {
+            transcripts.removeAll { $0.id == entry.id }
+            activeID = nil; selectedID = nil; pasteTarget = nil; fnHoldInProgress = false
+            return
+        }
         hudTask?.cancel(); hudMessage = nil; hudVisible = true; showHUD?()
         startingID = entry.id
         do {
@@ -307,6 +333,7 @@ final class AppModel: ObservableObject {
         let id = activeID
         do {
             let original = try await speech.stop()
+            guard activeID == id, !Task.isCancelled else { return }
             let text = TextTools.clean(original, replacements: preferences.vocabulary)
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
@@ -315,6 +342,7 @@ final class AppModel: ObservableObject {
             // Deliver immediately when final text exists; history writes and audio
             // retention cleanup should never stand between stop and the clipboard.
             if review == nil, !text.isEmpty { await deliver(text) }
+            guard activeID == id, !Task.isCancelled else { return }
             if let requestedAt = stopRequestedAt {
                 timingLog.info("Final text ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms; clipboard enabled: \(self.preferences.autoCopy, privacy: .public)")
             }
@@ -322,7 +350,8 @@ final class AppModel: ObservableObject {
                 activeID = nil; onRecordingChanged?(false); dismissHUD(message: "Recording kept"); return
             }
             // Audio is captured for crash recovery even when retention is disabled.
-            if !preferences.keepAudio, let i = index(id), let url = storage.audioURL(for: transcripts[i]) {
+            if !preferences.keepAudio, !text.isEmpty, review == nil,
+               let i = index(id), let url = storage.audioURL(for: transcripts[i]) {
                 do {
                     try FileManager.default.removeItem(at: url)
                     transcripts[i].audioFile = nil
@@ -334,6 +363,7 @@ final class AppModel: ObservableObject {
                 toast = review
             } else if text.isEmpty { notify("No words heard · recording saved") }
         } catch {
+            guard activeID == id else { return }
             updateActive(text: speech.liveText, duration: speech.elapsed, status: .interrupted)
             persist()
             errorMessage = "Your recording was kept. \(error.localizedDescription)"
@@ -348,6 +378,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancelRecording() {
+        if startingID != nil { cancelRecordingStartup(); return }
         guard speech.phase == .recording else { return }
         speech.requestStop()
         onRecordingChanged?(false)
@@ -373,7 +404,7 @@ final class AppModel: ObservableObject {
     private func index(_ id: UUID?) -> Int? { transcripts.firstIndex { $0.id == id } }
 
     func edit(_ id: UUID, text: String) {
-        guard let i = index(id), id != activeID else { return }
+        guard requireWritableLibrary(), let i = index(id), id != activeID, transcripts[i].deletedAt == nil else { return }
         transcripts[i].text = text
         editSaveTask?.cancel()
         editSaveTask = Task { [weak self] in
@@ -383,21 +414,21 @@ final class AppModel: ObservableObject {
         }
     }
     func favorite(_ id: UUID) {
-        guard let i = index(id) else { return }
+        guard requireWritableLibrary(), let i = index(id) else { return }
         transcripts[i].isFavorite.toggle(); persist()
     }
     func trash(_ id: UUID) {
-        guard let i = index(id), id != activeID else { return }
+        guard requireWritableLibrary(), let i = index(id), id != activeID else { return }
         if playingID == id { stopPlayback() }
         transcripts[i].deletedAt = Date(); selectedID = nil; persist()
         notify("Moved to Trash · restore it anytime")
     }
     func restore(_ id: UUID) {
-        guard let i = index(id) else { return }
+        guard requireWritableLibrary(), let i = index(id), id != activeID else { return }
         transcripts[i].deletedAt = nil; persist(); notify("Restored to your library")
     }
     func permanentlyDelete(_ id: UUID) {
-        guard let i = index(id), transcripts[i].deletedAt != nil else { return }
+        guard requireWritableLibrary(), let i = index(id), id != activeID, transcripts[i].deletedAt != nil else { return }
         let old = transcripts
         let audioURL = storage.audioURL(for: transcripts[i])
         transcripts.remove(at: i)
@@ -518,27 +549,35 @@ final class AppModel: ObservableObject {
     }
 
     func retry(_ entry: Transcript) {
-        guard speech.phase == .idle, activeID == nil, let url = storage.audioURL(for: entry) else { return }
+        guard requireWritableLibrary(), speech.phase == .idle, activeID == nil,
+              let i = index(entry.id), transcripts[i].deletedAt == nil,
+              let url = storage.audioURL(for: transcripts[i]) else { return }
         stopPlayback()
+        let locale = transcripts[i].locale
+        let engine = preferences.recognitionEngine
+        let vocabulary = preferences.vocabulary
+        activeID = entry.id; selectedID = entry.id
+        errorMessage = nil
         recordingTask = Task {
-            activeID = entry.id; selectedID = entry.id
+            defer { if activeID == entry.id { activeID = nil } }
+            guard !Task.isCancelled, activeID == entry.id else { return }
             do {
-                let original = try await speech.transcribeFile(url, localeID: entry.locale, recognitionEngine: preferences.recognitionEngine, vocabulary: preferences.vocabulary)
-                updateActive(text: TextTools.clean(original, replacements: preferences.vocabulary), duration: speech.elapsed,
+                let original = try await speech.transcribeFile(url, localeID: locale, recognitionEngine: engine, vocabulary: vocabulary)
+                guard !Task.isCancelled, activeID == entry.id else { return }
+                updateActive(text: TextTools.clean(original, replacements: vocabulary), duration: speech.elapsed,
                              status: original.isEmpty ? .failed : .complete)
                 if let i = index(entry.id) { transcripts[i].originalText = original }
                 if let i = index(entry.id) {
-                    transcripts[i].engineName = preferences.recognitionEngine.rawValue; transcripts[i].confidence = speech.confidence
+                    transcripts[i].engineName = engine.rawValue; transcripts[i].confidence = speech.confidence
                     transcripts[i].reviewReason = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
                 }
-                persist(); notify("Recording transcribed")
-            } catch { errorMessage = error.localizedDescription }
-            activeID = nil
+                persist(); notify(original.isEmpty ? "No words heard · recording saved" : "Recording transcribed")
+            } catch { if !Task.isCancelled, activeID == entry.id { errorMessage = error.localizedDescription } }
         }
     }
 
     func importAudio() {
-        guard !speech.phase.isBusy, activeID == nil else { return }
+        guard requireWritableLibrary(), !speech.phase.isBusy, activeID == nil else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.audio]
         panel.allowsMultipleSelection = false
@@ -549,7 +588,13 @@ final class AppModel: ObservableObject {
             entry.audioFile = "\(entry.id.uuidString).\(url.pathExtension.isEmpty ? "m4a" : url.pathExtension)"
             guard let destination = storage.audioURL(for: entry) else { return }
             try FileManager.default.copyItem(at: url, to: destination)
-            transcripts.insert(entry, at: 0); persist(); filter = .all; search = ""
+            transcripts.insert(entry, at: 0)
+            guard persist() else {
+                transcripts.removeAll { $0.id == entry.id }
+                try? FileManager.default.removeItem(at: destination)
+                return
+            }
+            filter = .all; search = ""
             retry(entry)
         } catch { errorMessage = error.localizedDescription }
     }
@@ -599,12 +644,17 @@ final class AppModel: ObservableObject {
         insertionTestTask?.cancel()
         microphoneCheck.stop()
         editSaveTask?.cancel(); persist()
-        if speech.phase == .recording { await finishRecording() }
-        else if speech.phase == .finishing || (speech.phase == .idle && activeID != nil) { await recordingTask?.value }
-        else if speech.phase.isBusy {
+        if startingID != nil { cancelRecordingStartup() }
+        else if speech.phase.isBusy || activeID != nil {
             recordingTask?.cancel()
-            checkpoint(); await speech.abort(); updateActive(status: .interrupted); persist(); activeID = nil
+            if speech.phase == .recording { speech.requestStop() }
+            if selectedActive?.status == .recording { checkpoint(); updateActive(status: .interrupted) }
+            await speech.abort(); persist(); activeID = nil
         }
+        startingID = nil; fnHoldInProgress = false; pasteTarget = nil
+        checkpointTimer?.invalidate(); checkpointTimer = nil
+        hudTask?.cancel(); hudTask = nil; hudVisible = false; hideHUD?()
+        onRecordingChanged?(false)
         speech.localSpeech.parakeet.stop()
         for task in Array(startupCleanupTasks.values) { await task.value }
         stopPlayback()

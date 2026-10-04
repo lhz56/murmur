@@ -64,7 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         makeHUD()
         makeStatusItem()
         model.showWindow = { [weak self] in self?.openLibrary() }
-        model.showHUD = { [weak self] in self?.showRecorder() }
+        model.showHUD = { [weak self] in
+            self?.shortcut.setRecording(true)
+            self?.showRecorder()
+        }
         model.hideHUD = { [weak self] in self?.panel.orderOut(nil) }
         model.onRecordingChanged = { [weak self] recording in
             self?.shortcut.setRecording(recording)
@@ -258,7 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Task { await model.prepareToQuit(); shortcut.unregister(); fnShortcut.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
             return .terminateLater
         }
-        model.flushEdits(); shortcut.unregister(); fnShortcut.stop(); return .terminateNow
+        model.flushEdits(); model.microphoneCheck.stop(); model.speech.localSpeech.parakeet.stop()
+        shortcut.unregister(); fnShortcut.stop(); return .terminateNow
     }
 }
 

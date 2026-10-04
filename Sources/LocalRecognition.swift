@@ -39,28 +39,48 @@ enum LocalSpeechError: LocalizedError {
     private var output: Pipe?
     private var errorPipe: Pipe?
     private var buffer = Data()
-    private var ready: [CheckedContinuation<Void, Error>] = []
+    private var ready: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var waiting: [String: CheckedContinuation<RecognitionResult, Error>] = [:]
+    private var requestDeadlines: [String: Task<Void, Never>] = [:]
     var isReady = false
     private var session = UUID()
     private var startupDeadline: Task<Void, Never>?
     var startupTimeout: Duration = .seconds(60)
+    var requestTimeout: Duration = .seconds(120)
     var onProgress: ((Double) -> Void)?
+    var onReadiness: ((Bool) -> Void)?
+    private let executable: URL?
+    private let modelDirectory: URL?
+    init(executable: URL? = nil, modelDirectory: URL? = nil) {
+        self.executable = executable; self.modelDirectory = modelDirectory
+    }
     static var modelRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Murmur/Models/parakeet-tdt-0.6b-v3-coreml", isDirectory: true)
     }
     func start(install: Bool = false) async throws {
+        try Task.checkCancellation()
         if isReady, process?.isRunning == true { return }
-        if process != nil {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in ready.append(continuation) }
-            return
+        let waiter = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                ready[waiter] = continuation
+                if process != nil { return }
+                do { try launch(install: install) } catch { fail(error) }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.ready.removeValue(forKey: waiter)?.resume(throwing: CancellationError()) }
         }
-        guard let resources = Bundle.main.resourceURL else { throw LocalSpeechError.unavailable("Murmur’s local speech helper is missing.") }
-        let binary = resources.appendingPathComponent("Helpers/MurmurParakeet")
-        guard FileManager.default.isExecutableFile(atPath: binary.path) else { throw LocalSpeechError.unavailable("This build doesn’t include Parakeet’s speech helper.") }
+    }
+
+    private func launch(install: Bool) throws {
+        guard let binary = executable ?? Bundle.main.resourceURL?.appendingPathComponent("Helpers/MurmurParakeet"),
+              FileManager.default.isExecutableFile(atPath: binary.path) else {
+            throw LocalSpeechError.unavailable("This build doesn’t include Parakeet’s speech helper.")
+        }
         let task = Process(); let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
-        task.executableURL = binary; task.arguments = [Self.modelRoot.path] + (install ? ["--install"] : [])
+        task.executableURL = binary; task.arguments = [(modelDirectory ?? Self.modelRoot).path] + (install ? ["--install"] : [])
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
         process = task; input = stdin; output = stdout; errorPipe = stderr; buffer = Data()
         session = UUID(); let current = session
@@ -72,17 +92,12 @@ enum LocalSpeechError: LocalizedError {
         task.terminationHandler = { [weak self] _ in
             Task { @MainActor in if self?.session == current { self?.fail(LocalSpeechError.failed("Parakeet stopped. Your recording was kept; try again.")) } }
         }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            ready.append(continuation)
-            do {
-                try task.run()
-                let timeout = install ? Duration.seconds(300) : startupTimeout
-                startupDeadline = Task { [weak self] in
-                    do { try await Task.sleep(for: timeout) } catch { return }
-                    guard let self, self.session == current, !self.isReady else { return }
-                    self.fail(LocalSpeechError.timeout)
-                }
-            } catch { fail(error) }
+        try task.run()
+        let timeout = install ? Duration.seconds(300) : startupTimeout
+        startupDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            guard let self, self.session == current, !self.isReady else { return }
+            self.fail(LocalSpeechError.timeout)
         }
     }
     private func receive(_ data: Data) {
@@ -94,9 +109,14 @@ enum LocalSpeechError: LocalizedError {
             if type == "progress" { onProgress?(message["fraction"] as? Double ?? 0) }
             else if type == "ready" {
                 startupDeadline?.cancel(); startupDeadline = nil
-                isReady = true; let continuations = ready; ready.removeAll(); continuations.forEach { $0.resume() }
+                isReady = true; onReadiness?(true)
+                let continuations = ready; ready.removeAll(); continuations.values.forEach { $0.resume() }
             }
-            else if let id = message["id"] as? String, let continuation = waiting.removeValue(forKey: id) {
+            else if let id = message["id"] as? String {
+                // A cancelled request can finish later. Its result or error must
+                // not terminate the shared worker or another pending request.
+                guard let continuation = waiting.removeValue(forKey: id) else { continue }
+                requestDeadlines.removeValue(forKey: id)?.cancel()
                 if type == "result" { continuation.resume(returning: RecognitionResult(text: message["text"] as? String ?? "", confidence: (message["confidence"] as? NSNumber)?.floatValue)) }
                 else { continuation.resume(throwing: LocalSpeechError.failed(message["message"] as? String ?? "Local transcription failed.")) }
             } else if type == "error" { fail(LocalSpeechError.failed(message["message"] as? String ?? "Parakeet couldn’t start.")) }
@@ -104,25 +124,38 @@ enum LocalSpeechError: LocalizedError {
     }
     func transcribe(_ url: URL) async throws -> RecognitionResult {
         try await start()
+        try Task.checkCancellation()
         let id = UUID().uuidString
-        return try await withCheckedThrowingContinuation { continuation in
-            waiting[id] = continuation
-            do {
-                var data = try JSONSerialization.data(withJSONObject: ["id": id, "path": url.path]); data.append(10)
-                try input?.fileHandleForWriting.write(contentsOf: data)
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(120))
-                    if self?.waiting[id] != nil { self?.fail(LocalSpeechError.timeout) }
-                }
-            } catch { waiting.removeValue(forKey: id)?.resume(throwing: error) }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                waiting[id] = continuation
+                do {
+                    guard let input else { throw LocalSpeechError.failed("Local transcription was stopped.") }
+                    var data = try JSONSerialization.data(withJSONObject: ["id": id, "path": url.path]); data.append(10)
+                    try input.fileHandleForWriting.write(contentsOf: data)
+                    let timeout = requestTimeout
+                    requestDeadlines[id] = Task { [weak self] in
+                        do { try await Task.sleep(for: timeout) } catch { return }
+                        if self?.waiting[id] != nil { self?.fail(LocalSpeechError.timeout) }
+                    }
+                } catch { waiting.removeValue(forKey: id)?.resume(throwing: error) }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.requestDeadlines.removeValue(forKey: id)?.cancel()
+                self?.waiting.removeValue(forKey: id)?.resume(throwing: CancellationError())
+            }
         }
     }
     func stop() { fail(LocalSpeechError.failed("Local transcription was stopped.")) }
     private func fail(_ error: Error) {
         startupDeadline?.cancel(); startupDeadline = nil
         isReady = false
+        onReadiness?(false)
         session = UUID()
-        let starts = ready; ready.removeAll(); starts.forEach { $0.resume(throwing: error) }
+        let starts = ready; ready.removeAll(); starts.values.forEach { $0.resume(throwing: error) }
+        requestDeadlines.values.forEach { $0.cancel() }; requestDeadlines.removeAll()
         let requests = waiting; waiting.removeAll()
         for continuation in requests.values { continuation.resume(throwing: error) }
         output?.fileHandleForReading.readabilityHandler = nil; errorPipe?.fileHandleForReading.readabilityHandler = nil
@@ -157,7 +190,8 @@ enum SpeechVocabulary {
         let model = resources.appendingPathComponent("Models/ggml-large-v3-turbo-q5_0.bin")
         guard FileManager.default.isExecutableFile(atPath: binary.path), FileManager.default.fileExists(atPath: model.path) else { throw LocalSpeechError.unavailable("Whisper’s local model is missing from this build.") }
         let terms = SpeechVocabulary.terms(vocabulary)
-        return try await Task.detached(priority: .userInitiated) {
+        let recognition = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
             let temp = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-whisper-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: temp) }
@@ -171,6 +205,7 @@ enum SpeechVocabulary {
             let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
             task.standardOutput = log; task.standardError = log
             try task.run()
+            defer { if task.isRunning { task.terminate() } }
             let deadline = Date().addingTimeInterval(180)
             while task.isRunning, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
             if task.isRunning { task.terminate(); throw LocalSpeechError.timeout }
@@ -184,7 +219,8 @@ enum SpeechVocabulary {
                 return (token["p"] as? NSNumber)?.floatValue
             }
             return RecognitionResult(text: text, confidence: probabilities.isEmpty ? nil : probabilities.reduce(0, +) / Float(probabilities.count))
-        }.value
+        }
+        return try await withTaskCancellationHandler { try await recognition.value } onCancel: { recognition.cancel() }
     }
 }
 
@@ -193,8 +229,11 @@ enum AudioFileConversion {
         let input = try AVAudioFile(forReading: source)
         var result = InputSignal()
         while input.framePosition < input.length {
+            try Task.checkCancellation()
             let buffer = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 4096)!
-            try input.read(into: buffer); result.observe(buffer)
+            try input.read(into: buffer)
+            guard buffer.frameLength > 0 else { break }
+            result.observe(buffer)
         }
         return result
     }
@@ -205,8 +244,10 @@ enum AudioFileConversion {
         converter.primeMethod = .none
         let output = try AVAudioFile(forWriting: destination, settings: [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false], commonFormat: .pcmFormatFloat32, interleaved: false)
         while input.framePosition < input.length {
+            try Task.checkCancellation()
             let buffer = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 4096)!
             try input.read(into: buffer)
+            guard buffer.frameLength > 0 else { break }
             let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(ceil(Double(buffer.frameLength) * 16000 / input.processingFormat.sampleRate)) + 64)!
             var supplied = false; var error: NSError?
             let status = converter.convert(to: converted, error: &error) { _, state in

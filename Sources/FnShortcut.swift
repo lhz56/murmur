@@ -71,6 +71,7 @@ final class FnShortcut {
     private var controlPressedAt: TimeInterval?
     static let controlHoldDelay: TimeInterval = 0.10
     private var installedKey: DictationKey?
+    private var releaseRequiredFor: DictationKey?
 
     func refresh() {
         if !enabled() { stop(); onAvailability?(false); return }
@@ -100,10 +101,7 @@ final class FnShortcut {
                 guard let context else { return Unmanaged.passUnretained(event) }
                 let shortcut = Unmanaged<FnShortcut>.fromOpaque(context).takeUnretainedValue()
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    shortcut.pending?.cancel()
-                    if shortcut.state.didTrigger && shortcut.state.behavior == .hold { shortcut.onAction?(.finishHold) }
-                    shortcut.state.reset()
-                    if let tap = shortcut.tap { CGEvent.tapEnable(tap: tap, enable: true) }
+                    shortcut.handleTapInterruption()
                     return Unmanaged.passUnretained(event)
                 }
                 return shortcut.handle(type: type, event: event) ? nil : Unmanaged.passUnretained(event)
@@ -134,6 +132,10 @@ final class FnShortcut {
     func sampleControl(flags: CGEventFlags, keyDownCount: UInt32) {
         guard enabled(), trigger() == .control else { return }
         defer { previousControlCount = keyDownCount }
+        if let key = releaseRequiredFor {
+            if flags.contains(key == .control ? .maskControl : .maskSecondaryFn) { return }
+            releaseRequiredFor = nil
+        }
         let down = flags.contains(.maskControl)
         let other: CGEventFlags = [.maskCommand, .maskAlternate, .maskShift, .maskSecondaryFn]
         if down && !state.isDown {
@@ -162,6 +164,10 @@ final class FnShortcut {
 
     func handle(type: CGEventType, event: CGEvent) -> Bool {
         guard enabled() else { return false }
+        if let key = releaseRequiredFor {
+            if event.flags.contains(key == .control ? .maskControl : .maskSecondaryFn) { return false }
+            releaseRequiredFor = nil
+        }
         if trigger() == .control {
             if type == .flagsChanged {
                 sampleControl(flags: event.flags,
@@ -250,10 +256,26 @@ final class FnShortcut {
         controlStartCount = nil
         previousControlCount = nil
         controlPressedAt = nil
+        releaseRequiredFor = nil
+    }
+
+    private func abandonHeldInput() {
+        // Reconfiguring or disabling the hook must not lose the release of an
+        // active hold. Chords and explicitly latched recordings remain untouched.
+        let finishHold = state.isDown && !state.isChord && state.behavior == .hold && (state.didTrigger || state.wasBusy)
+        let heldKey = state.isDown ? installedKey ?? trigger() : releaseRequiredFor
+        resetInput()
+        releaseRequiredFor = heldKey
+        if finishHold { onAction?(.finishHold) }
+    }
+
+    func handleTapInterruption() {
+        abandonHeldInput()
+        if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
     }
 
     func stop() {
-        resetInput()
+        abandonHeldInput()
         controlTimer?.invalidate(); controlTimer = nil
         installedKey = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }

@@ -31,7 +31,7 @@ enum Microphones {
         var value: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr else { return nil }
-        return value?.takeUnretainedValue() as String?
+        return value?.takeRetainedValue() as String?
     }
 
     static var defaultID: AudioDeviceID {

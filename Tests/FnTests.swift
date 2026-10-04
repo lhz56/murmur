@@ -110,7 +110,26 @@ import CoreGraphics
         control.sampleControl(flags: .maskControl, keyDownCount: 103)
         control.sampleControl(flags: [], keyDownCount: 103)
         assert(controlActions == [.finishHold]) // Tap to end hands-free never starts another session.
+        control.resetInput(); controlActions = []; control.isBusy = { false }
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
+        controlTime += 0.2
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
         control.stop()
+        assert(controlActions == [.startHold, .finishHold], "Disabling a held shortcut must finish its recording")
+        controlTime += 0.2
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
+        assert(controlActions == [.startHold, .finishHold], "Restarting a hook must wait for the physical key to release")
+        control.sampleControl(flags: [], keyDownCount: 103)
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
+        controlTime += 0.2
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
+        control.handleTapInterruption()
+        assert(controlActions == [.startHold, .finishHold, .startHold, .finishHold])
+        controlTime += 0.2
+        control.sampleControl(flags: .maskControl, keyDownCount: 103)
+        assert(controlActions.count == 4, "A disabled event tap must not restart a still-held key")
+        control.sampleControl(flags: [], keyDownCount: 103)
+        shortcut.resetInput()
         var timestamp: TimeInterval = 10
         shortcut.clock = { timestamp }
         shortcut.isBusy = { false }
