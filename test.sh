@@ -2,11 +2,14 @@
 set -euo pipefail
 PROJECT_DIR=${0:A:h}
 mkdir -p "$PROJECT_DIR/.build"
+/usr/bin/clang -fobjc-arc -target arm64-apple-macos26.0 -c "$PROJECT_DIR/Sources/AudioTapBridge.m" -o "$PROJECT_DIR/.build/AudioTapBridge.o"
 /usr/bin/swiftc -swift-version 5 "$PROJECT_DIR/Sources/Models.swift" "$PROJECT_DIR/Tests/StorageTests.swift" -o "$PROJECT_DIR/.build/storage-tests"
 "$PROJECT_DIR/.build/storage-tests"
 /usr/bin/swiftc -swift-version 5 "$PROJECT_DIR/Sources/FnShortcut.swift" "$PROJECT_DIR/Tests/FnTests.swift" -o "$PROJECT_DIR/.build/fn-tests"
 "$PROJECT_DIR/.build/fn-tests"
 /usr/bin/swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos26.0 "$PROJECT_DIR/Sources/TextInsertion.swift" "$PROJECT_DIR/Tests/TextInsertionTests.swift" -o "$PROJECT_DIR/.build/insertion-tests"
 "$PROJECT_DIR/.build/insertion-tests"
-/usr/bin/swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos26.0 "$PROJECT_DIR/Sources/Models.swift" "$PROJECT_DIR/Sources/FnShortcut.swift" "$PROJECT_DIR/Sources/KeyboardInfo.swift" "$PROJECT_DIR/Sources/Microphones.swift" "$PROJECT_DIR/Sources/LocalRecognition.swift" "$PROJECT_DIR/Sources/DictationEngine.swift" "$PROJECT_DIR/Sources/TextInsertion.swift" "$PROJECT_DIR/Sources/AppModel.swift" "$PROJECT_DIR/Tests/FnIntegrationTests.swift" -o "$PROJECT_DIR/.build/fn-integration-tests"
+/usr/bin/swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos26.0 -import-objc-header "$PROJECT_DIR/Sources/AudioTapBridge.h" "$PROJECT_DIR/Sources/Models.swift" "$PROJECT_DIR/Sources/FnShortcut.swift" "$PROJECT_DIR/Sources/KeyboardInfo.swift" "$PROJECT_DIR/Sources/Microphones.swift" "$PROJECT_DIR/Sources/LocalRecognition.swift" "$PROJECT_DIR/Sources/DictationEngine.swift" "$PROJECT_DIR/Sources/TextInsertion.swift" "$PROJECT_DIR/Sources/AppModel.swift" "$PROJECT_DIR/Tests/FnIntegrationTests.swift" "$PROJECT_DIR/.build/AudioTapBridge.o" -o "$PROJECT_DIR/.build/fn-integration-tests"
 "$PROJECT_DIR/.build/fn-integration-tests"
+/usr/bin/swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos26.0 -import-objc-header "$PROJECT_DIR/Sources/AudioTapBridge.h" "$PROJECT_DIR/Sources/Models.swift" "$PROJECT_DIR/Sources/Microphones.swift" "$PROJECT_DIR/Sources/LocalRecognition.swift" "$PROJECT_DIR/Sources/DictationEngine.swift" "$PROJECT_DIR/Tests/AudioStartupTests.swift" "$PROJECT_DIR/.build/AudioTapBridge.o" -o "$PROJECT_DIR/.build/audio-startup-tests"
+"$PROJECT_DIR/.build/audio-startup-tests"

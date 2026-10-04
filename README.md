@@ -54,6 +54,10 @@ Choose **Press to toggle** in Settings for hands-free Control recording, or use 
 
 The floating pill does not take keyboard focus. Capture stops synchronously on key release; final transcription still takes processing time. Very short or uncertain results with weak audio are saved for review rather than automatically inserted. Vocabulary corrections apply explicitly configured replacements; Murmur does not use a language model to rewrite your meaning.
 
+The recording cue follows the first copied microphone buffer, without waiting for disk writes or meter updates. Murmur prepares a stopped microphone graph ahead of use and reuses it after recording; it captures no audio while idle. Input taps use the microphone's current hardware format. A small Objective-C bridge converts native tap exceptions into recoverable errors because Swift cannot catch those exceptions directly.
+
+In four installed-app EarPods tests, recording setup took 0.33–0.51 seconds from the app's start request to its cue, and microphone stops took 25–63 ms. These are local measurements, not guarantees; the Control gesture adds a 100-ms chord-detection delay. [Measurement scope and regression checks](Benchmarks/startup-results.json).
+
 ## Storage and privacy
 
 Your library stays in `~/Library/Application Support/Murmur/`:

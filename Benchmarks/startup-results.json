@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-04",
+  "machine": "Apple silicon Mac16,10",
+  "input": "EarPods Microphone",
+  "recognitionEngine": "Parakeet with Apple live preview",
+  "measurement": "Installed certificate-signed app; monotonic timing logs from production code.",
+  "baseline": "The preceding installed build raised a native tap-format exception: 44.1-kHz hardware versus a cached 48-kHz output bus. No valid controlled baseline latency was obtained.",
+  "recordingRequestToStartCueMilliseconds": [454.074167, 418.644583, 326.688500, 510.386917],
+  "engineRequestToFirstCopiedBufferMilliseconds": [364.129000, 327.303000, 309.013708, 418.622625],
+  "inputGraphReadyMilliseconds": [79.699375, 71.575042, 46.121750, 158.357000],
+  "synchronousMicrophoneStopMilliseconds": [24.956833, 44.178250, 37.965500, 62.906708],
+  "quietRecordingStopToFinalMilliseconds": [539.358125, 782.577458],
+  "realMicrophoneStartsReceivingFrames": 4,
+  "sustainedRecordingRemainedActiveUntilStop": true,
+  "nativeTapFormatExceptionObservedInUpdatedStarts": false,
+  "earlyReleaseControllerRegressionPassed": true,
+  "firstBufferTimeoutCancellationAndSealedCaptureRegressionsPassed": true,
+  "nativeExceptionBridgeRegressionPassed": true,
+  "savedAudioAndFixtureFirstLastWordsPreserved": true,
+  "automaticCopyAndInsertionRestoredAfterTimingChecks": true,
+  "scope": "Four library-button starts using the actual selected microphone. Start cue timing includes destination capture, history setup and sound dispatch, but excludes the Control gesture's 100-ms chord-detection delay and physical sound playback latency. Two quiet recordings were finalized with no recognized words; two were kept as interrupted audio. Quiet finalization timings do not predict speech transcription or clipboard delivery latency. No speech accuracy or universal latency guarantee is made."
+}

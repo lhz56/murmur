@@ -74,9 +74,9 @@ enum Microphones {
         guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global,
                                    0, &current, &size) == noErr, current == device.deviceID else { return false }
         let hardware = engine.inputNode.inputFormat(forBus: 0)
-        let graph = engine.inputNode.outputFormat(forBus: 0)
+        // Tap installation applies the hardware format explicitly. The unused
+        // output bus can still carry the engine's default playback format.
         return hardware.sampleRate > 0 && hardware.channelCount > 0
-            && hardware.sampleRate == graph.sampleRate && hardware.channelCount == graph.channelCount
     }
 }
 
@@ -135,13 +135,13 @@ struct InputSignal: Equatable, Sendable {
             let input = audio.inputNode
             let format = input.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
-            input.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
+            if let error = MurmurInstallAudioTap(input, 0, 1024, format, { buffer, _ in
                 var value = InputSignal(); value.observe(buffer)
                 Task { @MainActor [weak self] in
                     guard let self, current == self.session else { return }
                     self.signal = value
                 }
-            }
+            }) { throw error }
             engine = audio; audio.prepare(); try audio.start(); isRunning = true
         } catch { stop(); self.error = error.localizedDescription }
     }

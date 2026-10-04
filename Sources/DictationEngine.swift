@@ -2,6 +2,7 @@ import AVFoundation
 import Speech
 import Combine
 import OSLog
+import os
 
 enum RecordingPhase: Equatable {
     case idle, preparing, downloading, recording, finishing
@@ -33,6 +34,41 @@ enum DictationError: LocalizedError {
     }
 }
 
+/// One notification from the first copied buffer, independent of file I/O and
+/// meter throttling. Finishing or cancellation cannot reopen the stream.
+final class FirstAudioBuffer: @unchecked Sendable {
+    private let first = OSAllocatedUnfairLock(initialState: false)
+    private let channel = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+
+    func receive() {
+        let notify = first.withLock { sent in
+            if sent { return false }
+            sent = true
+            return true
+        }
+        if notify { channel.continuation.yield(()); channel.continuation.finish() }
+    }
+    func finish() { channel.continuation.finish() }
+
+    func wait(timeout: Duration = .seconds(3)) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { [self] in
+                var iterator = channel.stream.makeAsyncIterator()
+                guard await iterator.next() != nil else {
+                    try Task.checkCancellation()
+                    throw DictationError.cancelled
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw DictationError.noInput
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
+    }
+}
+
 /// Copies the realtime microphone buffer, then does disk I/O and conversion off the audio thread.
 final class AudioPipeline: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.murmur.audio", qos: .userInitiated)
@@ -52,6 +88,7 @@ final class AudioPipeline: @unchecked Sendable {
     let onMeter: (Float) -> Void
     let onError: (Error) -> Void
     var onSignal: ((InputSignal) -> Void)?
+    let firstAudio = FirstAudioBuffer()
 
     convenience init(inputFormat: AVAudioFormat, targetFormat: AVAudioFormat, audioURL: URL,
          continuation: AsyncStream<AnalyzerInput>.Continuation,
@@ -121,7 +158,8 @@ final class AudioPipeline: @unchecked Sendable {
     }
 
     func append(_ buffer: AVAudioPCMBuffer) {
-        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return }
+        guard buffer.frameLength > 0,
+              let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { return }
         copy.frameLength = buffer.frameLength
         let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: buffer.audioBufferList))
         let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
@@ -130,6 +168,7 @@ final class AudioPipeline: @unchecked Sendable {
                 memcpy(dst, src, Int(source[index].mDataByteSize))
             }
         }
+        firstAudio.receive()
         queue.async { [self] in
             guard !failed, !finished else { return }
             do {
@@ -156,6 +195,7 @@ final class AudioPipeline: @unchecked Sendable {
     }
 
     @discardableResult func finish() async -> InputSignal {
+        firstAudio.finish()
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             queue.async { [self] in
                 file = nil // Flush the lossless container before saved audio can be played.
@@ -265,15 +305,22 @@ final class DictationEngine: ObservableObject {
     }
 
     private func discardPreparedInput() {
+        cancelInputPreparation()
+        preparedEngine = nil; preparedDevice = nil
+    }
+
+    private func cancelInputPreparation() {
         inputPreparation?.cancel()
         inputPreparation = nil; preparingDevice = nil; inputPreparationID = nil
-        preparedEngine = nil; preparedDevice = nil
     }
 
     func warmMicrophone(uid: String) async {
         guard (phase == .idle || phase == .finishing), engine == nil,
               AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        _ = try? await preparedInput(uid: uid)
+        if let audio = try? await preparedInput(uid: uid), engine == nil,
+           phase == .idle || phase == .finishing, preparedEngine === audio {
+            audio.prepare()
+        }
     }
 
     func refreshLanguages() async {
@@ -322,6 +369,7 @@ final class DictationEngine: ObservableObject {
             guard granted else { throw DictationError.microphone }
             var audioEngine = try await takePreparedInput(uid: microphoneUID)
             guard session == generation, !stopRequested else { throw DictationError.cancelled }
+            timingLog.info("Input graph ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
             inputName = try Microphones.selected(uid: microphoneUID).name
             var format = audioEngine.inputNode.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
@@ -339,7 +387,14 @@ final class DictationEngine: ObservableObject {
             for attempt in 0..<2 {
                 guard session == generation, !stopRequested else { throw DictationError.cancelled }
                 engine = audioEngine
-                audioEngine.inputNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in capture.append(buffer) }
+                // The input hardware can be 44.1 kHz while the engine's cached
+                // output bus is 48 kHz. nil selects that stale bus and raises an
+                // Objective-C exception. Apply the current hardware format.
+                format = audioEngine.inputNode.inputFormat(forBus: 0)
+                guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
+                if let error = MurmurInstallAudioTap(audioEngine.inputNode, 0, 1024, format, { buffer, _ in capture.append(buffer) }) {
+                    throw error
+                }
                 tapInstalled = true
                 audioEngine.prepare()
                 do { try audioEngine.start(); break }
@@ -353,6 +408,7 @@ final class DictationEngine: ObservableObject {
                     guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
                 }
             }
+            timingLog.info("Capture running in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
             startedAt = Date()
             clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
@@ -361,12 +417,8 @@ final class DictationEngine: ObservableObject {
                 }
             }
             // The start cue is emitted by the app only after actual microphone frames arrive.
-            for _ in 0..<60 {
-                guard session == generation, !stopRequested else { throw DictationError.cancelled }
-                if signal.hasFrames { break }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            guard signal.hasFrames else { throw DictationError.noInput }
+            try await capture.firstAudio.wait()
+            guard session == generation, !stopRequested, !Task.isCancelled else { throw DictationError.cancelled }
             phase = .recording
             recognitionPreparing = true
             // Start the preview after microphone readiness, so its setup cannot delay the cue.
@@ -436,7 +488,7 @@ final class DictationEngine: ObservableObject {
         phase = .finishing
         clock?.invalidate(); clock = nil
         if let start = startedAt { elapsed = Date().timeIntervalSince(start) }
-        stopCapture()
+        stopCapture(reuse: true)
         level = 0
         timingLog.info("Microphone stopped in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
         Task { [weak self] in
@@ -514,10 +566,16 @@ final class DictationEngine: ObservableObject {
         } catch { await abort(); throw error }
     }
 
-    private func stopCapture() {
-        engine?.stop()
-        if tapInstalled { engine?.inputNode.removeTap(onBus: 0); tapInstalled = false }
+    private func stopCapture(reuse: Bool = false) {
+        let stopped = engine
+        stopped?.stop()
+        if tapInstalled { stopped?.inputNode.removeTap(onBus: 0); tapInstalled = false }
         engine = nil
+        if reuse, let stopped, let device = try? Microphones.selected(uid: selectedMicrophoneUID),
+           Microphones.isConfigured(stopped, for: device) {
+            cancelInputPreparation()
+            preparedEngine = stopped; preparedDevice = device
+        }
     }
 
     /// Release startup synchronously, even if a permission/device operation
@@ -525,20 +583,21 @@ final class DictationEngine: ObservableObject {
     func cancelStartup() -> Task<InputSignal, Never>? {
         guard phase == .preparing || phase == .downloading else { return nil }
         stopRequested = true
-        discardPreparedInput()
-        let capture = releaseSession()
+        cancelInputPreparation()
+        let capture = releaseSession(reuseInput: true)
         let capturedSignal = signal
+        Task { await warmMicrophone(uid: selectedMicrophoneUID) }
         return Task { await capture?.finish() ?? capturedSignal }
     }
 
-    private func releaseSession() -> AudioPipeline? {
+    private func releaseSession(reuseInput: Bool = false) -> AudioPipeline? {
         generation = UUID()
         setupTask?.cancel(); setupTask = nil; recognitionPreparing = false
         clock?.invalidate(); clock = nil
         progressTimer?.invalidate(); progressTimer = nil
         if let start = startedAt { elapsed = Date().timeIntervalSince(start) }
         startedAt = nil
-        stopCapture()
+        stopCapture(reuse: reuseInput)
         let capture = pipeline
         pipeline = nil
         let abandonedAnalyzer = analyzer; analyzer = nil

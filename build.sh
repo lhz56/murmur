@@ -46,7 +46,8 @@ if [[ -d "$APP_DIR" ]]; then
   /usr/bin/ditto "$APP_DIR" "$STAGED_APP"
 fi
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
-/usr/bin/swiftc -swift-version 5 -O -parse-as-library -target arm64-apple-macos26.0 -module-name Murmur "$PROJECT_DIR"/Sources/*.swift -o "$STAGED_APP/Contents/MacOS/Murmur"
+/usr/bin/clang -fobjc-arc -target arm64-apple-macos26.0 -c "$PROJECT_DIR/Sources/AudioTapBridge.m" -o "$BUILD_STAGING/AudioTapBridge.o"
+/usr/bin/swiftc -swift-version 5 -O -parse-as-library -target arm64-apple-macos26.0 -module-name Murmur -import-objc-header "$PROJECT_DIR/Sources/AudioTapBridge.h" "$PROJECT_DIR"/Sources/*.swift "$BUILD_STAGING/AudioTapBridge.o" -o "$STAGED_APP/Contents/MacOS/Murmur"
 cp "$PROJECT_DIR/Info.plist" "$STAGED_APP/Contents/Info.plist"
 if [[ -f "$PROJECT_DIR/Resources/Murmur.icns" ]]; then
   cp "$PROJECT_DIR/Resources/Murmur.icns" "$STAGED_APP/Contents/Resources/Murmur.icns"

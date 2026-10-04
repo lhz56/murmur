@@ -211,6 +211,7 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled else { return }
         guard activeID == nil, speech.phase == .idle else { return }
         guard writesEnabled else { showWindow?(); return }
+        let requestedAt = ProcessInfo.processInfo.systemUptime
         insertionTestTask?.cancel()
         errorMessage = nil
         stopPlayback()
@@ -237,6 +238,7 @@ final class AppModel: ObservableObject {
             if let i = index(entry.id) { transcripts[i].microphoneName = speech.inputName }
             onRecordingChanged?(true)
             playSound("start")
+            timingLog.info("Recording ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms from start request")
             checkpointTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.checkpoint() }
             }
