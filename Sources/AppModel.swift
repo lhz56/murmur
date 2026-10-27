@@ -344,7 +344,10 @@ final class AppModel: ObservableObject {
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
-            if let i = index(id) { transcripts[i].confidence = speech.confidence; transcripts[i].reviewReason = review }
+            if let i = index(id) {
+                transcripts[i].confidence = speech.confidence; transcripts[i].reviewReason = review
+                transcripts[i].engineName = speech.selectedEngine.rawValue
+            }
             // Deliver immediately when final text exists; history writes and audio
             // retention cleanup should never stand between stop and the clipboard.
             if review == nil, !text.isEmpty { await deliver(text) }
@@ -607,7 +610,7 @@ final class AppModel: ObservableObject {
                              status: original.isEmpty ? .failed : .complete)
                 if let i = index(entry.id) { transcripts[i].originalText = original }
                 if let i = index(entry.id) {
-                    transcripts[i].engineName = engine.rawValue; transcripts[i].confidence = speech.confidence
+                    transcripts[i].engineName = speech.selectedEngine.rawValue; transcripts[i].confidence = speech.confidence
                     transcripts[i].reviewReason = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
                 }
                 persist(); notify(original.isEmpty ? "No words heard · recording saved" : "Recording transcribed")

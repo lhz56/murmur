@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ApplicationServices
+import Carbon
 
 enum FnBehavior: String, CaseIterable { case hold = "Hold to talk", toggle = "Press to toggle" }
 enum DictationKey: String, CaseIterable {
@@ -66,6 +67,8 @@ final class FnShortcut {
     private var handsFreeChord = false
     private var lastShortTap: TimeInterval?
     private var controlTimer: Timer?
+    private var controlPolling: ControlPolling = .off
+    private var holdCheck: Timer?
     private var controlStartCount: UInt32?
     private var previousControlCount: UInt32?
     private var controlPressedAt: TimeInterval?
@@ -77,21 +80,7 @@ final class FnShortcut {
         if !enabled() { stop(); onAvailability?(false); return }
         if installedKey != trigger() { stop() }
         installedKey = trigger()
-        if trigger() == .control && controlTimer == nil {
-            // Modifier flags and the event count contain no typed text. They let
-            // Control holds and taps work globally without an Accessibility tap.
-            // The timer fires on the main run loop; sample inline rather than
-            // allocating and scheduling a task 100 times per second.
-            let timer = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.sampleControl(flags: CGEventSource.flagsState(.combinedSessionState),
-                                        keyDownCount: CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown))
-                }
-            }
-            timer.tolerance = 0.002
-            controlTimer = timer
-            RunLoop.main.add(timer, forMode: .common)
-        }
+        defer { updateControlPolling() }
         if let tap, AXIsProcessTrusted(), CFMachPortIsValid(tap) { onAvailability?(true); return }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes); self.source = nil }
         if let tap { CFMachPortInvalidate(tap); self.tap = nil }
@@ -132,6 +121,53 @@ final class FnShortcut {
         onAvailability?(trigger() == .control)
     }
 
+    private enum ControlPolling { case off, watch, fast }
+
+    /// With an event tap, Control presses arrive as events and the app stays idle.
+    /// Without one, or while Secure Keyboard Entry hides key events from taps,
+    /// poll the modifier state instead. Flags and counters contain no typed text.
+    private func updateControlPolling() {
+        let wanted: ControlPolling
+        if !enabled() || trigger() != .control { wanted = .off }
+        else if tap == nil || IsSecureEventInputEnabled() { wanted = .fast }
+        else { wanted = .watch }
+        guard wanted != controlPolling else { return }
+        controlTimer?.invalidate(); controlTimer = nil
+        controlPolling = wanted
+        guard wanted != .off else { return }
+        let fast = wanted == .fast
+        let timer = Timer(timeInterval: fast ? 0.01 : 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.controlPolling == .fast { self.sampleCurrentControl() }
+                self.updateControlPolling()
+            }
+        }
+        timer.tolerance = fast ? 0.002 : 0.1
+        controlTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func sampleCurrentControl() {
+        sampleControl(flags: CGEventSource.flagsState(.combinedSessionState),
+                      keyDownCount: CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown))
+    }
+
+    /// Event-driven holds get no further events while Control stays down, so
+    /// check once when the hold threshold elapses.
+    private func scheduleHoldCheck() {
+        holdCheck?.invalidate()
+        let timer = Timer(timeInterval: Self.controlHoldDelay + 0.005, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.holdCheck = nil
+                if self.state.isDown { self.sampleCurrentControl() }
+            }
+        }
+        holdCheck = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     func sampleControl(flags: CGEventFlags, keyDownCount: UInt32) {
         guard enabled(), trigger() == .control else { return }
         defer { previousControlCount = keyDownCount }
@@ -147,6 +183,7 @@ final class FnShortcut {
             controlStartCount = keyDownCount
             if let previousControlCount, previousControlCount != keyDownCount { _ = state.otherKey() }
             onFnSignal?(true)
+            if controlPolling == .watch, state.behavior == .hold { scheduleHoldCheck() }
         }
         if state.isDown {
             if !flags.intersection(other).isEmpty || controlStartCount != keyDownCount {
@@ -255,6 +292,7 @@ final class FnShortcut {
 
     func resetInput() {
         pending?.cancel(); pending = nil; state.reset(); consumedSpace = false; handsFreeChord = false
+        holdCheck?.invalidate(); holdCheck = nil
         lastShortTap = nil
         controlStartCount = nil
         previousControlCount = nil
@@ -279,7 +317,7 @@ final class FnShortcut {
 
     func stop() {
         abandonHeldInput()
-        controlTimer?.invalidate(); controlTimer = nil
+        controlTimer?.invalidate(); controlTimer = nil; controlPolling = .off
         installedKey = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes); self.source = nil }

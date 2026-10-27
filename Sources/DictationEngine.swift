@@ -261,7 +261,8 @@ final class DictationEngine: ObservableObject {
     private var tapInstalled = false
     private var setupTask: Task<Void, Error>?
     private var recordedURL: URL?
-    private var selectedEngine: RecognitionEngine = .apple
+    /// The engine finishing the current job; Apple when the chosen one isn't installed.
+    private(set) var selectedEngine: RecognitionEngine = .apple
     private var selectedLocale = "en-US"
     private var selectedVocabulary = ""
     private var stopRequested = false
@@ -385,6 +386,9 @@ final class DictationEngine: ObservableObject {
     func start(audioURL: URL, localeID: String, microphoneUID: String = "", recognitionEngine: RecognitionEngine = .apple, vocabulary: String = "") async throws {
         guard phase == .idle else { return }
         phase = .preparing
+        // A missing helper or model must not fail every dictation: finish with
+        // Apple's on-device result, which the live preview already provides.
+        let recognitionEngine = localSpeech.isInstalled(recognitionEngine) ? recognitionEngine : .apple
         let requestedAt = ProcessInfo.processInfo.systemUptime
         generation = UUID()
         let session = generation
@@ -583,6 +587,8 @@ final class DictationEngine: ObservableObject {
     func transcribeFile(_ url: URL, localeID: String, recognitionEngine: RecognitionEngine = .apple, vocabulary: String = "") async throws -> String {
         try Task.checkCancellation()
         guard phase == .idle else { throw DictationError.unavailable }
+        let recognitionEngine = localSpeech.isInstalled(recognitionEngine) ? recognitionEngine : .apple
+        selectedEngine = recognitionEngine
         phase = .preparing
         generation = UUID()
         let session = generation

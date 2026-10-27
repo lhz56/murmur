@@ -8,6 +8,12 @@ cp "$PROJECT_DIR/LocalSpeech/.build/release/MurmurParakeet" "$PROJECT_DIR/Resour
 for bundle in "$PROJECT_DIR"/LocalSpeech/.build/release/*.bundle; do
   ditto "$bundle" "$PROJECT_DIR/Resources/Helpers/${bundle:t}"
 done
+# --parakeet-only skips whisper.cpp and its ~550 MB model. Parakeet is the
+# recommended engine: it runs on the Neural Engine and stays cool.
+if [[ "${1:-}" == "--parakeet-only" ]]; then
+  print "Parakeet helper is ready. Run ./build.sh to package Murmur."
+  exit 0
+fi
 if [[ ! -d "$RUNTIME_DIR/whisper.cpp" ]]; then
   git clone --depth 1 --branch v1.8.7 https://github.com/ggml-org/whisper.cpp.git "$RUNTIME_DIR/whisper.cpp"
 fi

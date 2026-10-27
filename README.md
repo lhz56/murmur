@@ -28,8 +28,9 @@ Clone this repository, then run:
 git clone https://github.com/lhz56/murmur.git
 cd murmur
 
-# Build Parakeet and Whisper helpers and download the Whisper model.
-./Tools/BuildLocalSpeech.sh
+# Build the Parakeet helper (recommended). Omit --parakeet-only to also
+# build Whisper and download its ~550 MB model.
+./Tools/BuildLocalSpeech.sh --parakeet-only
 
 # Compile and sign the native app. Quit an existing Murmur process first.
 ./build.sh
@@ -37,6 +38,10 @@ open Murmur.app
 ```
 
 There is no Xcode project. The app compiles directly from `Sources/` using SwiftUI, AppKit, AVAudioEngine, and Apple's SpeechAnalyzer / SpeechTranscriber APIs. `LocalSpeech/Package.resolved` pins the Parakeet helper's Swift dependencies. Model files, speech helper binaries, app bundles, and build caches are excluded from Git.
+
+Parakeet is the recommended engine: it runs on the Neural Engine rather than the GPU, transcribes a typical dictation in about 0.1 seconds, and keeps a fanless or quiet Mac cool. Whisper runs on the GPU and is slower and warmer. If the selected engine's helper or model is missing, Murmur finishes with Apple's on-device result instead of failing.
+
+While idle, Murmur receives Control presses as events once Accessibility is allowed, rather than polling the keyboard. It falls back to polling only without that permission or while Secure Keyboard Entry is on.
 
 For an Apple-only build, skip `Tools/BuildLocalSpeech.sh`, run `./build.sh`, and choose **Apple** in Settings. For Parakeet, use **Download model** in Settings once on a new Mac. Whisper uses the model downloaded by `Tools/BuildLocalSpeech.sh`.
 

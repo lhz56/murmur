@@ -5,9 +5,9 @@ enum RecognitionEngine: String, CaseIterable {
     case apple = "Apple", parakeet = "Parakeet", whisper = "Whisper"
     var subtitle: String {
         switch self {
-        case .apple: return "Live transcription using Apple’s on-device model."
-        case .parakeet: return "Apple live preview, then Parakeet checks the complete recording locally."
-        case .whisper: return "Apple live preview, then Whisper checks the complete recording locally."
+        case .apple: return "Live transcription using Apple’s on-device model. Lightest on battery and heat."
+        case .parakeet: return "Recommended. Apple live preview, then Parakeet checks the full recording on the Neural Engine: fast, accurate and cool-running."
+        case .whisper: return "Apple live preview, then Whisper checks the full recording on the GPU. Slower and warmer than Parakeet."
         }
     }
 }
@@ -53,6 +53,12 @@ enum LocalSpeechError: LocalizedError {
     private let modelDirectory: URL?
     init(executable: URL? = nil, modelDirectory: URL? = nil) {
         self.executable = executable; self.modelDirectory = modelDirectory
+    }
+    /// Both the bundled helper and the downloaded model are present.
+    var isInstalled: Bool {
+        guard let binary = executable ?? Bundle.main.resourceURL?.appendingPathComponent("Helpers/MurmurParakeet") else { return false }
+        return FileManager.default.isExecutableFile(atPath: binary.path) &&
+            FileManager.default.fileExists(atPath: (modelDirectory ?? Self.modelRoot).path)
     }
     static var modelRoot: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -179,6 +185,18 @@ enum SpeechVocabulary {
 
 @MainActor final class LocalRecognition {
     let parakeet = ParakeetWorker()
+
+    /// Whether `engine` can run on this build. Apple's engine ships with macOS.
+    func isInstalled(_ engine: RecognitionEngine) -> Bool {
+        switch engine {
+        case .apple: return true
+        case .parakeet: return parakeet.isInstalled
+        case .whisper:
+            guard let resources = Bundle.main.resourceURL else { return false }
+            return FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("Helpers/whisper-cli").path) &&
+                FileManager.default.fileExists(atPath: resources.appendingPathComponent("Models/ggml-large-v3-turbo-q5_0.bin").path)
+        }
+    }
     func transcribe(_ url: URL, engine: RecognitionEngine, locale: String, vocabulary: String) async throws -> RecognitionResult {
         if engine == .parakeet {
             let supported = ["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk"]
