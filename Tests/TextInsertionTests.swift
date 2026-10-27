@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @main struct TextInsertionTests {
@@ -159,6 +160,26 @@ import Foundation
         assert(!TextInsertion.isPasteMenuCommand(character: "v", modifiers: nil, enabled: true, pressSupported: true))
         assert(!TextInsertion.isPasteMenuCommand(character: "c", modifiers: 0, enabled: true, pressSupported: true))
 
+        // Borrowing the clipboard for a paste restores every item and type afterward.
+        let board = NSPasteboard(name: NSPasteboard.Name("app.murmur.tests.\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let custom = NSPasteboard.PasteboardType("app.murmur.tests.custom")
+        let first = NSPasteboardItem(); first.setString("Original clipboard", forType: .string)
+        first.setData(Data([1, 2, 3]), forType: custom)
+        let second = NSPasteboardItem(); second.setString("https://example.com", forType: .URL)
+        board.clearContents(); board.writeObjects([first, second])
+        let snapshot = PasteboardSnapshot(board)!
+        board.clearContents(); board.setString("Dictated text", forType: .string)
+        snapshot.restore(to: board)
+        let restored = board.pasteboardItems ?? []
+        assert(restored.count == 2)
+        assert(restored[0].string(forType: .string) == "Original clipboard" && restored[0].data(forType: custom) == Data([1, 2, 3]))
+        assert(restored[1].string(forType: .URL) == "https://example.com")
+        assert(PasteboardSnapshot(board, byteLimit: 4) == nil, "Oversized clipboards are left alone rather than duplicated")
+        board.clearContents()
+        PasteboardSnapshot(board)!.restore(to: board)
+        assert((board.pasteboardItems ?? []).isEmpty, "An empty clipboard is restored as empty")
+
         print("PASS: insertion expectations honor UTF-16 caret and selection offsets")
         print("PASS: missing, negative, out-of-bounds, and overflowing AX ranges are rejected")
         print("PASS: receiver content takes precedence over caret-only insertion confirmation")
@@ -166,5 +187,6 @@ import Foundation
         print("PASS: custom editor eligibility requires writable text and excludes secure, disabled, and read-only controls")
         print("PASS: compatibility paste stays in the original app, window, and editor; named replacements require matching geometry")
         print("PASS: only enabled standard Command-V menu actions are eligible for a single paste attempt")
+        print("PASS: borrowed clipboard contents restore every item and type; oversized contents are skipped")
     }
 }

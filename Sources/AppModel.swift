@@ -71,9 +71,11 @@ final class AppModel: ObservableObject {
     @Published var parakeetPreparationError: String?
     @Published var hudVisible = false
     @Published var hudMessage: String?
+    @Published var hudDetail: String?
     var onRecordingChanged: ((Bool) -> Void)?
     var showWindow: (() -> Void)?
-    var showHUD: (() -> Void)?
+    /// Shows the floating pill. `true` also captures Escape to cancel recording.
+    var showHUD: ((_ capturesEscape: Bool) -> Void)?
     var hideHUD: (() -> Void)?
     var refreshFn: (() -> Void)?
     var resetFnInput: (() -> Void)?
@@ -119,8 +121,11 @@ final class AppModel: ObservableObject {
                 errorMessage = historyFailure
             }
         }
-        speech.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
-        microphoneCheck.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
+        // Only the recording phase affects library-wide controls. Meter, clock and
+        // live-text updates arrive many times per second; the views that show them
+        // observe `speech` and `microphoneCheck` directly, so the library list and
+        // detail pane don't re-render while you talk.
+        speech.$phase.removeDuplicates().sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
         preferences.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         speech.onText = { [weak self] text in
             guard let self, let entry = self.selectedActive, entry.status == .recording else { return }
@@ -153,11 +158,12 @@ final class AppModel: ObservableObject {
         }
     }
     var savedTranscripts: [Transcript] { transcripts.filter { $0.deletedAt == nil && $0.status != .recording } }
-    var wordCount: Int { savedTranscripts.reduce(0) { $0 + $1.wordCount } }
-    var totalDuration: TimeInterval { savedTranscripts.reduce(0) { $0 + $1.duration } }
+    var savedCount: Int { transcripts.reduce(0) { $0 + ($1.deletedAt == nil && $1.status != .recording ? 1 : 0) } }
+    var lastTranscript: Transcript? {
+        transcripts.first { $0.deletedAt == nil && $0.status == .complete && !$0.text.isEmpty }
+    }
     var selected: Transcript? { transcripts.first { $0.id == selectedID } }
     private var selectedActive: Transcript? { transcripts.first { $0.id == activeID } }
-    var recordingTime: String { String(format: "%02d:%02d", Int(speech.elapsed) / 60, Int(speech.elapsed) % 60) }
 
     @discardableResult
     private func persist() -> Bool {
@@ -254,7 +260,7 @@ final class AppModel: ObservableObject {
             activeID = nil; selectedID = nil; pasteTarget = nil; fnHoldInProgress = false
             return
         }
-        hudTask?.cancel(); hudMessage = nil; hudVisible = true; showHUD?()
+        hudTask?.cancel(); hudMessage = nil; hudDetail = nil; hudVisible = true; showHUD?(true)
         startingID = entry.id
         do {
             try await speech.start(audioURL: audioURL, localeID: entry.locale, microphoneUID: preferences.microphoneUID,
@@ -373,8 +379,17 @@ final class AppModel: ObservableObject {
         stopRequestedAt = nil
         fnHoldInProgress = false
         onRecordingChanged?(false)
-        let needsReview = transcripts.first { $0.id == id }?.reviewReason != nil
-        dismissHUD(message: needsReview ? "Saved · check this thought" : speech.liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "No clear speech · audio kept" : errorMessage == nil ? deliveryResult?.hudMessage ?? (preferences.autoCopy ? "Copied · ready to paste" : "Saved · ready to copy") : "Recording kept")
+        let finished = transcripts.first { $0.id == id }
+        let heardNothing = speech.liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let message: String
+        if finished?.reviewReason != nil { message = "Saved · check this thought" }
+        else if heardNothing { message = "No clear speech · audio kept" }
+        else if errorMessage != nil { message = "Recording kept" }
+        else { message = deliveryResult?.hudMessage ?? (preferences.autoCopy ? "Copied · ready to paste" : "Saved · ready to copy") }
+        if let words = finished?.wordCount, words > 0, errorMessage == nil {
+            hudDetail = "\(words) word\(words == 1 ? "" : "s") · saved to your library"
+        }
+        dismissHUD(message: message)
     }
 
     func cancelRecording() {
@@ -452,21 +467,45 @@ final class AppModel: ObservableObject {
         notify("Copied. Go make something.")
     }
 
-    func deliver(_ text: String) async {
+    /// Copies and/or pastes finished text. `paste` overrides the Insert preference
+    /// for explicit commands such as Paste Last Transcript.
+    func deliver(_ text: String, paste: Bool? = nil) async {
+        let shouldPaste = paste ?? preferences.autoPaste
         let destination = pasteTarget
         pasteTarget = nil
         deliveryResult = nil
         accessibilityEnabled = AXIsProcessTrusted()
-        if preferences.autoCopy || preferences.autoPaste {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+        let pasteboard = NSPasteboard.general
+        // Without "Copy to clipboard", insertion only borrows the clipboard and
+        // restores the user's previous contents once the paste is confirmed.
+        let borrowed = shouldPaste && !preferences.autoCopy ? PasteboardSnapshot(pasteboard) : nil
+        if preferences.autoCopy || shouldPaste {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
         }
-        if preferences.autoPaste {
+        let written = pasteboard.changeCount
+        if shouldPaste {
             let result = await textInsertion.insert(text, into: destination)
             guard !Task.isCancelled else { return }
             deliveryResult = result
+            // Unconfirmed pastes keep the transcript on the clipboard as a fallback.
+            if case .inserted = result, let borrowed, pasteboard.changeCount == written { borrowed.restore(to: pasteboard) }
             notify(result.message)
         } else { notify(preferences.autoCopy ? "Saved & copied to clipboard" : "Saved to your library") }
+    }
+
+    /// Pastes the most recent transcript into the focused text box.
+    func pasteLastTranscript() {
+        guard !speech.phase.isBusy, activeID == nil, !isTestingFn else { return }
+        guard let entry = lastTranscript else { flashHUD("Nothing to paste yet"); return }
+        insertionTestTask?.cancel()
+        insertionTestTask = Task { [weak self] in
+            guard let self else { return }
+            pasteTarget = textInsertion.captureDestination()
+            await deliver(entry.text, paste: true)
+            guard !Task.isCancelled, let result = deliveryResult else { return }
+            flashHUD(result.hudMessage, detail: entry.title)
+        }
     }
 
     func testInsertion() {
@@ -636,8 +675,15 @@ final class AppModel: ObservableObject {
             hudVisible = false
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
-            hideHUD?(); hudMessage = nil
+            hideHUD?(); hudMessage = nil; hudDetail = nil
         }
+    }
+
+    /// Briefly shows a result in the pill when no recording is in progress.
+    private func flashHUD(_ message: String, detail: String? = nil) {
+        guard activeID == nil, !speech.phase.isBusy else { return }
+        hudDetail = detail; hudVisible = true; showHUD?(false)
+        dismissHUD(message: message)
     }
 
     func prepareToQuit() async {

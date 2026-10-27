@@ -240,6 +240,7 @@ final class DictationEngine: ObservableObject {
     @Published var confidence: Float?
     var onText: ((String) -> Void)?
     var onError: ((Error) -> Void)?
+    var clockLabel: String { String(format: "%d:%02d", Int(elapsed) / 60, Int(elapsed) % 60) }
 
     private var engine: AVAudioEngine?
     private var preparedEngine: AVAudioEngine?

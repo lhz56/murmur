@@ -8,9 +8,11 @@ import ApplicationServices
 final class GlobalShortcut {
     private var hotKey: EventHotKeyRef?
     private var escapeKey: EventHotKeyRef?
+    private var pasteKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     var onToggle: (() -> Void)?
     var onEscape: (() -> Void)?
+    var onPasteLast: (() -> Void)?
 
     func register() -> OSStatus {
         var specification = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -22,8 +24,11 @@ final class GlobalShortcut {
                               MemoryLayout<EventHotKeyID>.size, nil, &identifier)
             if identifier.id == 1 { shortcut.onToggle?() }
             if identifier.id == 2 { shortcut.onEscape?() }
+            if identifier.id == 3 { shortcut.onPasteLast?() }
             return noErr
         }, 1, &specification, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        // Paste Last Transcript (Control-Option-V) is optional; a conflict leaves it unregistered.
+        RegisterEventHotKey(9, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 3), GetApplicationEventTarget(), 0, &pasteKey)
         return RegisterEventHotKey(49, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 1), GetApplicationEventTarget(), 0, &hotKey)
     }
 
@@ -37,6 +42,7 @@ final class GlobalShortcut {
     func unregister() {
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let escapeKey { UnregisterEventHotKey(escapeKey) }
+        if let pasteKey { UnregisterEventHotKey(pasteKey) }
         if let handler { RemoveEventHandler(handler) }
     }
 }
@@ -47,7 +53,7 @@ final class FloatingPanel: NSPanel {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var window: NSWindow!
     private var panel: FloatingPanel!
     private var statusItem: NSStatusItem!
@@ -64,8 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         makeHUD()
         makeStatusItem()
         model.showWindow = { [weak self] in self?.openLibrary() }
-        model.showHUD = { [weak self] in
-            self?.shortcut.setRecording(true)
+        model.showHUD = { [weak self] capturesEscape in
+            if capturesEscape { self?.shortcut.setRecording(true) }
             self?.showRecorder()
         }
         model.hideHUD = { [weak self] in self?.panel.orderOut(nil) }
@@ -75,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         shortcut.onToggle = { [weak self] in self?.model.toggleRecording() }
         shortcut.onEscape = { [weak self] in self?.model.cancelRecording() }
+        shortcut.onPasteLast = { [weak self] in self?.model.pasteLastTranscript() }
         fnShortcut.behavior = { [weak self] in self?.model.preferences.fnBehavior ?? .hold }
         fnShortcut.trigger = { [weak self] in self?.model.preferences.dictationKey ?? .control }
         fnShortcut.enabled = { [weak self] in
@@ -132,7 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 940, height: 670)
-        window.backgroundColor = NSColor(calibratedRed: 0.980, green: 0.980, blue: 0.984, alpha: 1)
+        window.backgroundColor = .adaptive(light: 0xFAFAFB, dark: 0x1B1C1F)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.delegate = self
         window.setFrameAutosaveName(model.isPreview ? "MurmurPreview" : "MurmurMain")
@@ -175,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
-        panel.contentView = NSHostingView(rootView: RecorderHUD(model: model))
+        panel.contentView = NSHostingView(rootView: RecorderHUD(model: model, speech: model.speech))
     }
     private func showRecorder() {
         let location = NSEvent.mouseLocation
@@ -188,24 +195,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func makeStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
         updateStatusItem(recording: false)
     }
+
     private func updateStatusItem(recording: Bool) {
         let image = NSImage(systemSymbolName: recording ? "waveform.circle.fill" : "waveform", accessibilityDescription: "Murmur")
         image?.isTemplate = true
         statusItem.button?.image = image
         statusItem.button?.toolTip = recording ? "Murmur is listening · Control Option Space to finish" : "Murmur · Control Option Space to talk"
-        let menu = NSMenu()
-        let title = NSMenuItem(title: recording ? "Recording…" : "Murmur", action: nil, keyEquivalent: "")
-        title.isEnabled = false; menu.addItem(title); menu.addItem(.separator())
-        let record = NSMenuItem(title: recording ? "Finish Recording" : "Record    ⌃⌥Space", action: #selector(toggleRecording), keyEquivalent: "")
-        record.target = self; menu.addItem(record)
-        let open = NSMenuItem(title: "Open Library", action: #selector(openLibrary), keyEquivalent: "")
-        open.target = self; menu.addItem(open)
-        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: "")
-        settings.target = self; menu.addItem(settings); menu.addItem(.separator())
+    }
+
+    /// Rebuilt each time it opens, so it always reflects the latest transcript.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let recording = model.speech.phase == .recording
+        func item(_ title: String, _ action: Selector?, key: String = "", modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.target = self
+            menu.addItem(item)
+            return item
+        }
+        let title = item(recording ? "Recording…" : "Murmur", nil)
+        title.isEnabled = false
+        menu.addItem(.separator())
+        _ = item(recording ? "Finish Recording" : "Record", #selector(toggleRecording), key: " ", modifiers: [.control, .option])
+        let last = model.lastTranscript
+        let busy = model.speech.phase.isBusy
+        let copy = item("Copy Last Transcript", last == nil ? nil : #selector(copyLastTranscript))
+        copy.toolTip = last?.title
+        _ = item("Paste Last Transcript", last == nil || busy ? nil : #selector(pasteLastTranscript), key: "v", modifiers: [.control, .option])
+        menu.addItem(.separator())
+        _ = item("Open Library", #selector(openLibrary))
+        _ = item("Settings…", #selector(openSettings))
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Murmur", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        statusItem.menu = menu
     }
 
     private func makeMenu() {
@@ -249,10 +276,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openLibrary() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc private func openSettings() { openLibrary(); model.showSettings = true }
     @objc private func toggleRecording() { model.toggleRecording() }
+    @objc private func copyLastTranscript() { if let text = model.lastTranscript?.text { model.copy(text) } }
+    @objc private func pasteLastTranscript() { model.pasteLastTranscript() }
     @objc private func importAudio() { openLibrary(); model.importAudio() }
     @objc private func focusSearch() { openLibrary(); NotificationCenter.default.post(name: .murmurSearch, object: nil) }
     @objc private func showAbout() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Murmur", .applicationVersion: "1.0", .credits: NSAttributedString(string: "A little less typing. A lot more you.\nNative dictation. On-device speech. Your own library.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Murmur", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0", .credits: NSAttributedString(string: "A little less typing. A lot more you.\nNative dictation. On-device speech. Your own library.")])
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { openLibrary(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

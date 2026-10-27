@@ -25,6 +25,39 @@ enum InsertionResult: Equatable {
     }
 }
 
+/// A copy of every item and type on a pasteboard, so a paste can borrow the
+/// clipboard without losing what the user had copied.
+struct PasteboardSnapshot {
+    private let items: [[NSPasteboard.PasteboardType: Data]]
+
+    /// Very large contents (for example, copied video) are not duplicated in memory.
+    init?(_ pasteboard: NSPasteboard, byteLimit: Int = 64 << 20) {
+        var total = 0
+        var captured: [[NSPasteboard.PasteboardType: Data]] = []
+        for item in pasteboard.pasteboardItems ?? [] {
+            var types: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                guard let data = item.data(forType: type) else { continue }
+                total += data.count
+                if total > byteLimit { return nil }
+                types[type] = data
+            }
+            if !types.isEmpty { captured.append(types) }
+        }
+        items = captured
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        guard !items.isEmpty else { return }
+        pasteboard.writeObjects(items.map { types in
+            let item = NSPasteboardItem()
+            for (type, data) in types { item.setData(data, forType: type) }
+            return item
+        })
+    }
+}
+
 @MainActor final class TextInsertion {
     private let log = Logger(subsystem: "app.murmur.mac", category: "Insertion")
     private var accessibilityPreparation: [pid_t: Date] = [:]

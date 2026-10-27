@@ -2,6 +2,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Combine
+import os
 
 struct Microphone: Identifiable, Equatable {
     let id: String
@@ -17,13 +18,29 @@ enum Microphones {
         var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
         let status = ids.withUnsafeMutableBytes { AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, $0.baseAddress!) }
         guard status == noErr else { return [] }
-        return ids.compactMap { id in
-            var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
-            var bytes: UInt32 = 0
-            guard AudioObjectGetPropertyDataSize(id, &streams, 0, nil, &bytes) == noErr, bytes > 0,
-                  let uid = string(id, kAudioDevicePropertyDeviceUID), let name = string(id, kAudioObjectPropertyName) else { return nil }
-            return Microphone(id: uid, deviceID: id, name: name)
-        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return ids.compactMap(device).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// An input-capable device, or nil for unknown IDs and output-only hardware.
+    static func device(_ id: AudioDeviceID) -> Microphone? {
+        guard id != kAudioObjectUnknown else { return nil }
+        var streams = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+        var bytes: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &streams, 0, nil, &bytes) == noErr, bytes > 0,
+              let uid = string(id, kAudioDevicePropertyDeviceUID), let name = string(id, kAudioObjectPropertyName) else { return nil }
+        return Microphone(id: uid, deviceID: id, name: name)
+    }
+
+    static func deviceID(uid: String) -> AudioDeviceID {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var qualifier = uid as CFString
+        var id = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = withUnsafePointer(to: &qualifier) {
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address,
+                                       UInt32(MemoryLayout<CFString>.size), $0, &size, &id)
+        }
+        return status == noErr ? id : AudioDeviceID(kAudioObjectUnknown)
     }
 
     static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
@@ -43,13 +60,13 @@ enum Microphones {
     }
 
     /// Select only this engine's input; never change the Mac's system-wide microphone.
+    /// Resolves one device directly, so recording start never enumerates all hardware.
     static func selected(uid: String) throws -> Microphone {
-        let available = devices()
         if uid.isEmpty {
-            guard let device = available.first(where: { $0.deviceID == defaultID }) else { throw DictationError.noInput }
+            guard let device = device(defaultID) else { throw DictationError.noInput }
             return device
         }
-        guard let device = available.first(where: { $0.id == uid }) else { throw DictationError.missingMicrophone }
+        guard let device = device(deviceID(uid: uid)) else { throw DictationError.missingMicrophone }
         return device
     }
 
@@ -66,13 +83,17 @@ enum Microphones {
         return device.name
     }
 
-    /// A stopped graph can follow a system input change while it is waiting.
-    static func isConfigured(_ engine: AVAudioEngine, for device: Microphone) -> Bool {
-        guard let unit = engine.inputNode.audioUnit else { return false }
+    private static func currentDevice(_ unit: AudioUnit) -> AudioDeviceID? {
         var current = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global,
-                                   0, &current, &size) == noErr, current == device.deviceID else { return false }
+                                   0, &current, &size) == noErr else { return nil }
+        return current
+    }
+
+    /// A stopped graph can follow a system input change while it is waiting.
+    static func isConfigured(_ engine: AVAudioEngine, for device: Microphone) -> Bool {
+        guard let unit = engine.inputNode.audioUnit, currentDevice(unit) == device.deviceID else { return false }
         let hardware = engine.inputNode.inputFormat(forBus: 0)
         // Tap installation applies the hardware format explicitly. The unused
         // output bus can still carry the engine's default playback format.
@@ -135,7 +156,14 @@ struct InputSignal: Equatable, Sendable {
             let input = audio.inputNode
             let format = input.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
+            // The level meter needs ~20 updates a second, not one per hardware buffer.
+            let throttle = OSAllocatedUnfairLock(initialState: 0.0)
             if let error = MurmurInstallAudioTap(input, 0, 1024, format, { buffer, _ in
+                let now = ProcessInfo.processInfo.systemUptime
+                guard throttle.withLock({ last in
+                    guard now - last >= 0.05 else { return false }
+                    last = now; return true
+                }) else { return }
                 var value = InputSignal(); value.observe(buffer)
                 Task { @MainActor [weak self] in
                     guard let self, current == self.session else { return }

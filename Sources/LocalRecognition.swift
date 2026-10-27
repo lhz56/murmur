@@ -198,17 +198,26 @@ enum SpeechVocabulary {
             let wave = temp.appendingPathComponent("input.wav"), result = temp.appendingPathComponent("result")
             try AudioFileConversion.writeWave(url, to: wave)
             let task = Process(); task.executableURL = binary
-            task.arguments = ["-m", model.path, "-f", wave.path, "-l", String(locale.prefix(2)), "-ojf", "-of", result.path, "-np", "-nt", "-t", "4", "-bs", "5"]
+            task.arguments = ["-m", model.path, "-f", wave.path, "-l", String(locale.prefix(2)), "-ojf", "-of", result.path,
+                              "-np", "-nt", "-t", String(WhisperThreads.count), "-bs", "5"]
             if !terms.isEmpty { task.arguments! += ["--prompt", "Vocabulary: " + terms.joined(separator: ", ")] }
             let logURL = temp.appendingPathComponent("recognition.log")
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
             let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
             task.standardOutput = log; task.standardError = log
+            // Resume the moment the helper exits instead of polling for it.
+            let exited = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            task.terminationHandler = { _ in exited.continuation.yield(()); exited.continuation.finish() }
             try task.run()
             defer { if task.isRunning { task.terminate() } }
-            let deadline = Date().addingTimeInterval(180)
-            while task.isRunning, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
-            if task.isRunning { task.terminate(); throw LocalSpeechError.timeout }
+            let finished = try await withThrowingTaskGroup(of: Bool.self) { group in
+                group.addTask { for await _ in exited.stream { return true }; return true }
+                group.addTask { try await Task.sleep(for: .seconds(180)); return false }
+                defer { group.cancelAll() }
+                return try await group.next() ?? false
+            }
+            try Task.checkCancellation()
+            if !finished || task.isRunning { task.terminate(); throw LocalSpeechError.timeout }
             guard task.terminationStatus == 0 else { throw LocalSpeechError.failed("Whisper couldn’t transcribe this recording. Your audio was kept.") }
             let data = try Data(contentsOf: result.appendingPathExtension("json"))
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -257,4 +266,16 @@ enum AudioFileConversion {
             if converted.frameLength > 0 { try output.write(from: converted) }
         }
     }
+}
+
+enum WhisperThreads {
+    /// whisper.cpp scales with performance cores; efficiency cores slow it down.
+    static let count: Int = {
+        var cores: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 {
+            return min(max(Int(cores), 4), 12)
+        }
+        return min(max(ProcessInfo.processInfo.activeProcessorCount / 2, 4), 8)
+    }()
 }

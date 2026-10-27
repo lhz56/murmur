@@ -21,9 +21,26 @@ struct Transcript: Identifiable, Codable, Equatable {
 
     var wordCount: Int { text.split(whereSeparator: { $0.isWhitespace }).count }
     var title: String {
-        let first = text.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? ""
-        if first.isEmpty { return status == .recording ? "A thought in progress" : "Untitled recording" }
-        return first.count > 64 ? String(first.prefix(61)) + "…" : first
+        let split = titleSplit
+        if split.head.isEmpty { return status == .recording ? "A thought in progress" : "Untitled recording" }
+        return split.rest.isEmpty || split.endsLine ? split.head : split.head + "…"
+    }
+    /// The words after the title, for a second line that continues instead of repeating.
+    var preview: String {
+        titleSplit.rest.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+    /// The first line, cut at a word boundary near 64 characters, and everything after it.
+    private var titleSplit: (head: String, rest: String, endsLine: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lineEnd = trimmed.firstIndex(where: \.isNewline) ?? trimmed.endIndex
+        let line = trimmed[..<lineEnd]
+        if line.count <= 64 {
+            return (String(line), trimmed[lineEnd...].trimmingCharacters(in: .whitespacesAndNewlines), true)
+        }
+        let limit = line.index(line.startIndex, offsetBy: 61)
+        let cut = line[..<limit].lastIndex(where: \.isWhitespace).flatMap { $0 > line.startIndex ? $0 : nil } ?? limit
+        return (String(line[..<cut]).trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",;:-–—"))),
+                trimmed[cut...].trimmingCharacters(in: .whitespacesAndNewlines), false)
     }
     var durationLabel: String { String(format: "%d:%02d", Int(duration) / 60, Int(duration) % 60) }
 }
@@ -39,16 +56,25 @@ final class HistoryStorage {
     let audioDirectory: URL
     let historyURL: URL
     let backupURL: URL
+    /// Compact encoding for checkpoints written every few seconds while recording.
     private let encoder = JSONEncoder()
+    /// Readable encoding for files the user exports.
+    private let exportEncoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    /// Bytes known to decode as a valid history: the last file loaded or written.
+    /// Saves reuse them for the backup instead of re-reading and re-decoding disk.
+    private var lastGood: Data?
+    /// Whether `historyURL` currently holds exactly `lastGood`.
+    private var primaryIsCurrent = false
 
     init(unpreparedRoot root: URL) {
         self.root = root
         audioDirectory = root.appendingPathComponent("Recordings", isDirectory: true)
         historyURL = root.appendingPathComponent("history.json")
         backupURL = root.appendingPathComponent("history.backup.json")
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
+        exportEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        exportEncoder.dateEncodingStrategy = .iso8601
         decoder.dateDecodingStrategy = .iso8601
     }
 
@@ -58,20 +84,28 @@ final class HistoryStorage {
     }
 
     func load() throws -> [Transcript] {
+        lastGood = nil; primaryIsCurrent = false
         guard FileManager.default.fileExists(atPath: historyURL.path) else {
             guard FileManager.default.fileExists(atPath: backupURL.path) else { return [] }
-            return try recover(decoder.decode(HistoryDocument.self, from: Data(contentsOf: backupURL)))
+            return try recover(contentsOf: backupURL)
         }
-        let document: HistoryDocument
         do {
-            document = try decoder.decode(HistoryDocument.self, from: Data(contentsOf: historyURL))
+            return try recover(contentsOf: historyURL)
+        } catch StorageError.newerFormat {
+            throw StorageError.newerFormat
         } catch {
             // Preserve the damaged file for recovery instead of silently replacing it.
             let recovery = root.appendingPathComponent("history-damaged-\(UUID().uuidString).json")
             try? FileManager.default.copyItem(at: historyURL, to: recovery)
-            document = try decoder.decode(HistoryDocument.self, from: Data(contentsOf: backupURL))
+            return try recover(contentsOf: backupURL)
         }
-        return try recover(document)
+    }
+
+    private func recover(contentsOf url: URL) throws -> [Transcript] {
+        let data = try Data(contentsOf: url)
+        let transcripts = try recover(decoder.decode(HistoryDocument.self, from: data))
+        lastGood = data; primaryIsCurrent = url == historyURL
+        return transcripts
     }
 
     private func recover(_ document: HistoryDocument) throws -> [Transcript] {
@@ -85,11 +119,15 @@ final class HistoryStorage {
 
     func save(_ transcripts: [Transcript]) throws {
         let data = try encoder.encode(HistoryDocument(transcripts: transcripts))
-        if let previous = try? Data(contentsOf: historyURL),
-           (try? decoder.decode(HistoryDocument.self, from: previous)) != nil {
+        if primaryIsCurrent, data == lastGood { return }
+        if let previous = lastGood {
+            try previous.write(to: backupURL, options: .atomic)
+        } else if let previous = try? Data(contentsOf: historyURL),
+                  (try? decoder.decode(HistoryDocument.self, from: previous)) != nil {
             try previous.write(to: backupURL, options: .atomic)
         }
         try data.write(to: historyURL, options: .atomic)
+        lastGood = data; primaryIsCurrent = true
     }
 
     func audioURL(for entry: Transcript) -> URL? {
@@ -98,11 +136,11 @@ final class HistoryStorage {
     }
 
     func exportData(_ transcripts: [Transcript]) throws -> Data {
-        try encoder.encode(HistoryDocument(transcripts: transcripts))
+        try exportEncoder.encode(HistoryDocument(transcripts: transcripts))
     }
 
     func replaceBackup(_ transcripts: [Transcript]) throws {
-        try exportData(transcripts).write(to: backupURL, options: .atomic)
+        try encoder.encode(HistoryDocument(transcripts: transcripts)).write(to: backupURL, options: .atomic)
     }
 
     enum StorageError: LocalizedError {

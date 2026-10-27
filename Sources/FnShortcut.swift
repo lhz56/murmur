@@ -80,12 +80,15 @@ final class FnShortcut {
         if trigger() == .control && controlTimer == nil {
             // Modifier flags and the event count contain no typed text. They let
             // Control holds and taps work globally without an Accessibility tap.
+            // The timer fires on the main run loop; sample inline rather than
+            // allocating and scheduling a task 100 times per second.
             let timer = Timer(timeInterval: 0.01, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     self?.sampleControl(flags: CGEventSource.flagsState(.combinedSessionState),
                                         keyDownCount: CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown))
                 }
             }
+            timer.tolerance = 0.002
             controlTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }

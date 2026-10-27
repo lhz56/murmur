@@ -5,9 +5,11 @@ A native Mac dictation app with local transcription, a searchable recording libr
 ## Features
 
 - Hold **Control** to talk; release to stop. Release during startup cancels immediately, and short taps are ignored in hold mode.
-- A floating recording pill with voice animation and start/stop chimes.
-- Automatic clipboard copying and insertion into the original focused text box.
-- Saved transcripts and audio, search, favorites, editing, export, trash, and interrupted-recording recovery.
+- A floating recording pill with a waveform that follows your voice, live words, and start/stop chimes.
+- Automatic insertion into the original focused text box. With clipboard copying off, Murmur restores your previous clipboard after a confirmed insertion.
+- **Control + Option + V** pastes your last transcript into any text box; the menu bar can also copy it.
+- Saved transcripts and audio, search, favorites, editing, export, trash, and interrupted-recording recovery, with keyboard navigation and context menus.
+- Light and dark appearance that follows macOS.
 - Local Parakeet, Apple, and Whisper speech engines, with vocabulary corrections.
 - Microphone selection and input testing, shortcut testing, and a no-audio insertion check.
 
@@ -50,6 +52,8 @@ For an Apple-only build, skip `Tools/BuildLocalSpeech.sh`, run `./build.sh`, and
 
 Choose **Press to toggle** in Settings for hands-free Control recording, or use **Control + Option + Space**. Settings also offers **Fn / Globe** shortcuts. Fn must send a standard Mac Fn event; keys handled entirely inside keyboard firmware cannot trigger Murmur. **Test key** checks the physical signal without recording.
 
+In the library, use ↑/↓ to move between transcripts, ⌘C to copy the selected one, Delete to move it to Trash, and Esc to close it. Right-click a transcript for more actions.
+
 **Test microphone** displays the input level without saving audio. **Test insertion** gives you eight seconds to focus a text box, then inserts a test sentence without recording. Closing the library leaves Murmur in the menu bar; **Command + Q** quits.
 
 The floating pill does not take keyboard focus. Capture stops synchronously on key release; final transcription still takes processing time. Very short or uncertain results with weak audio are saved for review rather than automatically inserted. Vocabulary corrections apply explicitly configured replacements; Murmur does not use a language model to rewrite your meaning.
@@ -72,7 +76,7 @@ history.backup.json      Last successful history snapshot
 Recordings/              Original audio files
 ```
 
-History writes are atomic and checkpointed during recording. A missing primary history file can recover from its backup. Interrupted sessions keep recoverable audio. With **Save audio** off, Murmur removes audio only after a nonempty transcription that does not need review; failed, empty, and uncertain recordings keep their audio. An unavailable storage folder or an unsupported history version produces a recoverable error and blocks library changes rather than crashing or overwriting the existing files.
+History writes are atomic and checkpointed during recording. Unchanged checkpoints are skipped, and the backup reuses the last verified snapshot instead of re-reading it from disk. A missing primary history file can recover from its backup. Interrupted sessions keep recoverable audio. With **Save audio** off, Murmur removes audio only after a nonempty transcription that does not need review; failed, empty, and uncertain recordings keep their audio. An unavailable storage folder or an unsupported history version produces a recoverable error and blocks library changes rather than crashing or overwriting the existing files.
 
 Automatic insertion uses the clipboard and Accessibility permission. Murmur resolves focused editor children to their editable parent and captures the destination at recording start. It waits for shortcut modifiers to release, checks the foreground app, window, editor, and clipboard, then invokes the app's standard Paste menu command when available. Otherwise it sends one complete Command-V key sequence. Custom editors without a usable accessibility text node can receive Paste while their original focus or known window remains unchanged. Secure input, disabled controls, and clearly non-text controls are excluded. Murmur never presses Enter or retries an unconfirmed paste. Settings shows whether insertion was confirmed, Paste was sent without confirmation, or text was only copied. Recordings are not uploaded. Initial model downloads come from Apple's system service or public model repositories.
 

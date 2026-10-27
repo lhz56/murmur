@@ -5,6 +5,11 @@ import Foundation
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-test-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try HistoryStorage(root: root)
+        func primaryDecodes() -> Bool {
+            guard let data = try? Data(contentsOf: store.historyURL) else { return false }
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            return (try? decoder.decode(HistoryDocument.self, from: data)) != nil
+        }
         let empty = try store.load()
         assert(empty.isEmpty)
         var first = Transcript()
@@ -28,6 +33,7 @@ import Foundation
         let damagedCopies = try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix("history-damaged-") }
         assert(damagedCopies.count == 1)
         try store.save(fallback)
+        assert(primaryDecodes(), "Saving unchanged history recovered from backup must still repair the primary file")
         let restored = try store.load()
         assert(restored.count == 1)
         try FileManager.default.removeItem(at: store.historyURL)
@@ -35,6 +41,17 @@ import Foundation
         assert(missingPrimary.count == 1 && missingPrimary[0].id == first.id,
                "A missing primary history must recover the last-good backup")
         try store.save(missingPrimary)
+        assert(primaryDecodes(), "Saving unchanged history recovered from backup must recreate a missing primary file")
+        // Repeated identical checkpoints skip the write; a change still lands and
+        // the backup holds the previous good version.
+        var changed = missingPrimary[0]; changed.text = "A newer thought."
+        try store.save([changed])
+        let backupDecoder = JSONDecoder(); backupDecoder.dateDecodingStrategy = .iso8601
+        let backup = try backupDecoder.decode(HistoryDocument.self, from: Data(contentsOf: store.backupURL))
+        let reloaded = try store.load()
+        assert(backup.transcripts[0].text == missingPrimary[0].text && reloaded[0].text == "A newer thought.")
+        try store.save(try store.load())
+        assert(primaryDecodes())
         var unsafe = first; unsafe.audioFile = "../../secret"
         assert(store.audioURL(for: unsafe) == nil)
         assert(TextTools.clean("  Hello\t  world.  ") == "Hello world.")
@@ -44,6 +61,21 @@ import Foundation
         assert(TextTools.clean("Keep um and like as spoken.") == "Keep um and like as spoken.")
         let exported = try store.exportData(roundTrip)
         assert(String(data: exported, encoding: .utf8)!.contains("An edited thought."))
+        assert(String(data: exported, encoding: .utf8)!.contains("\n"), "Exports stay human-readable")
+        var titled = Transcript(); titled.status = .complete
+        titled.text = "What if I left my phone in the kitchen tonight and put a book on my bedside table instead?"
+        assert(titled.title == "What if I left my phone in the kitchen tonight and put a…")
+        assert(titled.preview == "book on my bedside table instead?")
+        titled.text = "Groceries\n\neggs   and milk"
+        assert(titled.title == "Groceries" && titled.preview == "eggs and milk")
+        titled.text = "Remember to book a table for Friday, pick up coffee beans, and send the photos"
+        assert(titled.title == "Remember to book a table for Friday, pick up coffee beans…")
+        titled.text = "Short thought."
+        assert(titled.title == "Short thought." && titled.preview.isEmpty)
+        titled.text = String(repeating: "x", count: 80)
+        assert(titled.title == String(repeating: "x", count: 61) + "…" && titled.preview == String(repeating: "x", count: 19))
+        titled.text = ""
+        assert(titled.title == "Untitled recording" && titled.preview.isEmpty)
         print("PASS: atomic persistence, crash recovery, last-good backup, original text, favorites, safe paths, vocabulary, export")
     }
 }
