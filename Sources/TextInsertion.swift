@@ -495,6 +495,18 @@ struct PasteboardSnapshot {
         return result
     }
 
+    /// The character just before the caret in the destination editor, read as a
+    /// one-character range so large documents are never copied across processes.
+    func characterBeforeCaret(in destination: Destination?) -> Character? {
+        guard let element = destination?.element, let selection = selectedRange(element), selection.location > 0 else { return nil }
+        var range = CFRange(location: selection.location - 1, length: 1)
+        guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, parameter, &value) == .success,
+              let string = value as? String else { return nil }
+        return string.last
+    }
+
     private func stringAttribute(_ element: AXUIElement, _ attribute: String) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }

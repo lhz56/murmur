@@ -16,6 +16,7 @@ final class Preferences: ObservableObject {
     @Published var keepAudio: Bool { didSet { defaults.set(keepAudio, forKey: "keepAudio") } }
     @Published var sounds: Bool { didSet { defaults.set(sounds, forKey: "sounds") } }
     @Published var vocabulary: String { didSet { defaults.set(vocabulary, forKey: "vocabulary") } }
+    @Published var removeFillers: Bool { didSet { defaults.set(removeFillers, forKey: "removeFillers") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
     @Published var dictationKey: DictationKey { didSet { defaults.set(dictationKey.rawValue, forKey: "dictationKey") } }
@@ -29,12 +30,15 @@ final class Preferences: ObservableObject {
         keepAudio = defaults.object(forKey: "keepAudio") as? Bool ?? true
         sounds = defaults.object(forKey: "sounds") as? Bool ?? true
         vocabulary = defaults.string(forKey: "vocabulary") ?? ""
+        removeFillers = defaults.object(forKey: "removeFillers") as? Bool ?? true
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
         dictationKey = DictationKey(rawValue: defaults.string(forKey: "dictationKey") ?? "") ?? .control
         microphoneUID = defaults.string(forKey: "microphoneUID") ?? ""
         recognitionEngine = RecognitionEngine(rawValue: defaults.string(forKey: "recognitionEngine") ?? "") ?? (preview ? .apple : .parakeet)
     }
+    /// Filler cleanup is English-only: "um" is a real word in German.
+    var cleansFillers: Bool { removeFillers && locale.hasPrefix("en") }
 }
 
 @MainActor
@@ -340,7 +344,7 @@ final class AppModel: ObservableObject {
         do {
             let original = try await speech.stop()
             guard activeID == id, !Task.isCancelled else { return }
-            let text = TextTools.clean(original, replacements: preferences.vocabulary)
+            let text = TextTools.clean(original, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers)
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
@@ -482,6 +486,7 @@ final class AppModel: ObservableObject {
         // Without "Copy to clipboard", insertion only borrows the clipboard and
         // restores the user's previous contents once the paste is confirmed.
         let borrowed = shouldPaste && !preferences.autoCopy ? PasteboardSnapshot(pasteboard) : nil
+        let text = shouldPaste ? TextTools.spaced(text, after: textInsertion.characterBeforeCaret(in: destination)) : text
         if preferences.autoCopy || shouldPaste {
             pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
@@ -598,6 +603,7 @@ final class AppModel: ObservableObject {
         let locale = transcripts[i].locale
         let engine = preferences.recognitionEngine
         let vocabulary = preferences.vocabulary
+        let removeFillers = preferences.cleansFillers
         activeID = entry.id; selectedID = entry.id
         errorMessage = nil
         recordingTask = Task {
@@ -606,7 +612,7 @@ final class AppModel: ObservableObject {
             do {
                 let original = try await speech.transcribeFile(url, localeID: locale, recognitionEngine: engine, vocabulary: vocabulary)
                 guard !Task.isCancelled, activeID == entry.id else { return }
-                updateActive(text: TextTools.clean(original, replacements: vocabulary), duration: speech.elapsed,
+                updateActive(text: TextTools.clean(original, replacements: vocabulary, removeFillers: removeFillers), duration: speech.elapsed,
                              status: original.isEmpty ? .failed : .complete)
                 if let i = index(entry.id) { transcripts[i].originalText = original }
                 if let i = index(entry.id) {

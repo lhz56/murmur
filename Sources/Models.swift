@@ -151,8 +151,9 @@ final class HistoryStorage {
 
 enum TextTools {
     /// Conservative formatting; never changes the meaning or removes arbitrary words.
-    static func clean(_ text: String, replacements: String = "") -> String {
+    static func clean(_ text: String, replacements: String = "", removeFillers: Bool = false) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if removeFillers { result = withoutFillers(result) }
         result = result.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
         for line in replacements.components(separatedBy: .newlines) {
             let pair = line.components(separatedBy: "=>")
@@ -166,5 +167,40 @@ enum TextTools {
             }
         }
         return result
+    }
+
+    /// English hesitation sounds the recognizer writes out: um, uh, erm, hmm.
+    /// Real words ("uh-huh", "umbrella") are left alone, along with the commas
+    /// that set a filler off, and a sentence that began with one is recapitalized.
+    private static let filler = try! NSRegularExpression(
+        pattern: "(?i)(,\\s*)?(?<![\\p{L}\\p{N}'’-])(?:u+h+m*|u+m+|e+r+m+|h+m+)(?![\\p{L}\\p{N}'’-])(\\s*,)?")
+
+    static func withoutFillers(_ text: String) -> String {
+        var result = text
+        for match in filler.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let before = result[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
+            let startsSentence = before.isEmpty || ".!?\n".contains(before.last!)
+            let offset = result.distance(from: result.startIndex, to: range.lowerBound)
+            result.replaceSubrange(range, with: "")
+            let start = result.index(result.startIndex, offsetBy: offset)
+            if startsSentence, let letter = result[start...].firstIndex(where: { !$0.isWhitespace }),
+               result[letter].isLetter {
+                result.replaceSubrange(letter...letter, with: result[letter].uppercased())
+            }
+        }
+        result = result.replacingOccurrences(of: "[ \\t]+([,.!?;:])", with: "$1", options: .regularExpression)
+        result = result.replacingOccurrences(of: "[ \\t]{2,}", with: " ", options: .regularExpression)
+        result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A recording that was only "Um." leaves nothing worth inserting.
+        return result.contains(where: { $0.isLetter || $0.isNumber }) ? result : ""
+    }
+
+    /// Adds a space when dictation lands right after a word, so two dictations
+    /// in a row read "Hello there. How are you" instead of "there.How".
+    static func spaced(_ text: String, after previous: Character?) -> String {
+        guard let previous, !previous.isWhitespace, !"([{“‘\"'/-".contains(previous),
+              let first = text.first, first.isLetter || first.isNumber else { return text }
+        return " " + text
     }
 }

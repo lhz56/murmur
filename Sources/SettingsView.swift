@@ -229,6 +229,10 @@ struct SettingsView: View {
 
     @ViewBuilder private var insertionPane: some View {
         Section {
+            Toggle(isOn: $preferences.removeFillers) {
+                Text("Remove filler words")
+                Text("Drop “um”, “uh” and “erm” from English transcripts. The original stays in your library.")
+            }
             Toggle(isOn: $preferences.autoPaste) {
                 Text("Insert into active app")
                 Text("Paste the transcript at your cursor when recording finishes.")

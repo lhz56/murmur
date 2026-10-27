@@ -208,9 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateStatusItem(recording: Bool) {
-        let image = NSImage(systemSymbolName: recording ? "waveform.circle.fill" : "waveform", accessibilityDescription: "Murmur")
-        image?.isTemplate = true
-        statusItem.button?.image = image
+        statusItem.button?.image = MenuBarGlyph.image(recording: recording)
         statusItem.button?.toolTip = recording ? "Murmur is listening · Control Option Space to finish" : "Murmur · Control Option Space to talk"
     }
 

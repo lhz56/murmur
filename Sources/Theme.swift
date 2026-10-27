@@ -131,16 +131,42 @@ struct ShortcutKeys: View {
     }
 }
 
+/// Murmur's mark, matching the app icon: a waveform that ends in a text cursor.
 struct WaveMark: View {
     var size: CGFloat = 32
     var body: some View {
-        HStack(spacing: size * 0.075) {
-            ForEach(0..<5) { index in
-                Capsule().fill(Palette.canvas).frame(width: size * 0.075, height: size * [0.22, 0.42, 0.60, 0.42, 0.22][index])
+        HStack(spacing: size * 0.05) {
+            ForEach(0..<4) { index in
+                Capsule().fill(Color.white).frame(width: size * 0.078, height: size * [0.21, 0.40, 0.57, 0.35][index])
             }
+            Capsule().fill(Color(hex: 0x3291EF)).frame(width: size * 0.042, height: size * 0.63).padding(.leading, size * 0.03)
         }.frame(width: size, height: size)
-            .background(Palette.ink, in: RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
+            .background(LinearGradient(colors: [Color(hex: 0x3A3A3D), Color(hex: 0x18181A)], startPoint: .top, endPoint: .bottom),
+                        in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
             .accessibilityHidden(true)
+    }
+}
+
+/// Menu bar glyph: the same waveform-and-cursor mark as a template image.
+enum MenuBarGlyph {
+    static func image(recording: Bool) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.setFill()
+            if recording {
+                NSBezierPath(roundedRect: NSRect(x: 0.5, y: 0.5, width: 17, height: 17), xRadius: 5, yRadius: 5).fill()
+                NSGraphicsContext.current?.compositingOperation = .destinationOut
+            }
+            var x: CGFloat = 2.5
+            for height: CGFloat in [4, 8, 11, 7] {
+                NSBezierPath(roundedRect: NSRect(x: x, y: 9 - height / 2, width: 2, height: height), xRadius: 1, yRadius: 1).fill()
+                x += 3
+            }
+            NSBezierPath(roundedRect: NSRect(x: x + 0.5, y: 2.5, width: 1.5, height: 13), xRadius: 0.75, yRadius: 0.75).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Murmur"
+        return image
     }
 }
 
