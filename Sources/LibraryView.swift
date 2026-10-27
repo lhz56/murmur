@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+/// Sidebar · transcript list · page.
 struct MainView: View {
     @ObservedObject var model: AppModel
     @FocusState private var searchFocused: Bool
@@ -10,25 +11,28 @@ struct MainView: View {
         // Filter once per render; rows, headers and keyboard navigation share it.
         let visible = model.visibleTranscripts
         HStack(spacing: 0) {
-            SidebarView(model: model).frame(width: 200)
-            Rectangle().fill(Palette.line).frame(width: 1)
-            VStack(alignment: .leading, spacing: 20) {
-                header(count: visible.count)
-                RecordingStatusView(model: model, speech: model.speech)
-                library(visible)
-            }.padding(.horizontal, 28).padding(.top, 38).padding(.bottom, 24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Palette.canvas)
+            SidebarView(model: model, speech: model.speech).frame(width: 228)
+            Hairline(vertical: true)
+            listColumn(visible).frame(width: 312)
+            Hairline(vertical: true)
+            Group {
+                if let entry = model.selected {
+                    TranscriptPage(model: model, entry: entry).id(entry.id)
+                } else {
+                    EmptyPage(model: model)
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .foregroundStyle(Palette.ink).frame(minWidth: 940, minHeight: 670)
+        .background(Palette.canvas)
+        .foregroundStyle(Palette.ink)
+        .frame(minWidth: 980, minHeight: 640)
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
-                ToastView(message: toast)
-                    .padding(.bottom, 18)
+                ToastView(message: toast).padding(.bottom, 20)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: model.toast)
+        .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.toast)
         .sheet(isPresented: $model.showSettings) {
             SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck)
         }
@@ -40,82 +44,54 @@ struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .murmurSearch)) { _ in searchFocused = true }
     }
 
-    private var title: String { model.filter == .all ? "Library" : model.filter.rawValue }
+    // MARK: List column
+
+    private func listColumn(_ visible: [Transcript]) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.filter.rawValue).font(.system(size: 13, weight: .semibold))
+                    Text(caption(count: visible.count)).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                        .contentTransition(.numericText())
+                }
+                Spacer(minLength: 8)
+                IconButton(symbol: "square.and.arrow.down", help: "Import audio") { model.importAudio() }
+                    .disabled(model.speech.phase.isBusy)
+                IconButton(symbol: "square.and.arrow.up", help: "Export library") { model.export() }
+            }.padding(.leading, 16).padding(.trailing, 8).frame(height: 52)
+            SearchField(text: $model.search, focused: $searchFocused).padding(.horizontal, 10).padding(.bottom, 6)
+            if visible.isEmpty {
+                EmptyList(searching: !model.search.isEmpty, filter: model.filter)
+            } else {
+                transcriptList(visible)
+            }
+        }.background(Palette.canvas)
+    }
 
     private func caption(count: Int) -> String {
-        if model.filter == .trash { return "Deleted transcripts can be restored." }
         let noun = "transcript\(count == 1 ? "" : "s")"
-        return model.search.isEmpty ? "\(count) \(noun) saved on this Mac" : "\(count) matching \(noun)"
-    }
-
-    private func header(count: Int) -> some View {
-        let phase = model.speech.phase
-        return HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title).font(.system(size: 25, weight: .semibold)).tracking(-0.5)
-                Text(caption(count: count)).font(.system(size: 12)).foregroundStyle(Palette.muted)
-                    .contentTransition(.numericText())
-            }
-            Spacer(minLength: 12)
-            Button(action: model.toggleRecording) {
-                HStack(spacing: 7) {
-                    Image(systemName: phase == .recording ? "stop.fill" : "mic.fill")
-                    Text(phase == .recording ? "Finish recording" : phase.isBusy ? "Processing…" : "Record")
-                }
-            }.buttonStyle(CapsuleButtonStyle(prominent: true))
-                .disabled(phase.isBusy && phase != .recording)
-                .help(phase == .recording ? "Finish recording (⌘N)" : "Start recording (⌘N)")
-                .accessibilityLabel(phase == .recording ? "Finish recording" : "Start recording")
-        }
-    }
-
-    private func library(_ visible: [Transcript]) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                SearchField(text: $model.search, focused: $searchFocused)
-                Spacer(minLength: 0)
-                SmallIconButton(symbol: "square.and.arrow.down", help: "Import audio") { model.importAudio() }
-                    .disabled(model.speech.phase.isBusy)
-                SmallIconButton(symbol: "square.and.arrow.up", help: "Export library") { model.export() }
-            }
-            HStack(alignment: .top, spacing: 16) {
-                if visible.isEmpty {
-                    EmptyLibraryView(searching: !model.search.isEmpty, filter: model.filter, record: model.toggleRecording)
-                } else {
-                    transcriptList(visible)
-                }
-                if let entry = model.selected {
-                    TranscriptDetail(model: model, entry: entry).id(entry.id).frame(width: 340)
-                        .frame(maxHeight: .infinity)
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }.frame(maxHeight: .infinity)
-                .animation(.spring(response: 0.32, dampingFraction: 0.9), value: model.selectedID == nil)
-        }.frame(maxHeight: .infinity)
+        if !model.search.isEmpty { return "\(count) matching" }
+        if model.filter == .trash { return count == 0 ? "Empty" : "\(count) deleted \(noun)" }
+        return "\(count) \(noun)"
     }
 
     private func transcriptList(_ visible: [Transcript]) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                LazyVStack(alignment: .leading, spacing: 1, pinnedViews: [.sectionHeaders]) {
                     ForEach(DaySection.group(visible)) { section in
                         Section {
-                            ForEach(section.entries) { entry in
-                                row(entry).id(entry.id).padding(.horizontal, 7)
-                            }
+                            ForEach(section.entries) { entry in row(entry).id(entry.id) }
                         } header: {
-                            Text(section.label).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
-                                .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
+                            Text(section.label).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.muted)
+                                .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 5)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Palette.surface)
+                                .background(Palette.canvas)
                         }
                     }
-                }.padding(.bottom, 9)
+                }.padding(.horizontal, 8).padding(.bottom, 12)
             }
             .scrollIndicators(.automatic)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .card()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .focusable().focused($listFocused).focusEffectDisabled()
             .onKeyPress(.upArrow) { moveSelection(-1, in: visible) }
             .onKeyPress(.downArrow) { moveSelection(1, in: visible) }
@@ -137,24 +113,22 @@ struct MainView: View {
     }
 
     private func row(_ entry: Transcript) -> some View {
-        TranscriptRow(entry: entry, selected: model.selectedID == entry.id, active: model.activeID == entry.id,
-                      select: {
-                          model.selectedID = model.selectedID == entry.id ? nil : entry.id
-                          listFocused = true
-                      },
-                      favorite: { model.favorite(entry.id) })
-            .contextMenu {
-                Button("Copy Text") { model.copy(entry.text) }.disabled(entry.text.isEmpty)
-                if entry.deletedAt == nil {
-                    Button(entry.isFavorite ? "Remove from Favorites" : "Add to Favorites") { model.favorite(entry.id) }
-                    Button("Export…") { model.export(entry) }
-                    Divider()
-                    Button("Move to Trash", role: .destructive) { model.trash(entry.id) }
-                        .disabled(model.activeID == entry.id)
-                } else {
-                    Button("Restore") { model.restore(entry.id) }
-                }
+        TranscriptRow(entry: entry, selected: model.selectedID == entry.id, active: model.activeID == entry.id) {
+            model.selectedID = entry.id
+            listFocused = true
+        }
+        .contextMenu {
+            Button("Copy Text") { model.copy(entry.text) }.disabled(entry.text.isEmpty)
+            if entry.deletedAt == nil {
+                Button(entry.isFavorite ? "Remove from Favorites" : "Add to Favorites") { model.favorite(entry.id) }
+                Button("Export…") { model.export(entry) }
+                Divider()
+                Button("Move to Trash", role: .destructive) { model.trash(entry.id) }
+                    .disabled(model.activeID == entry.id)
+            } else {
+                Button("Restore") { model.restore(entry.id) }
             }
+        }
     }
 
     /// Moves the selected transcript to Trash and selects its neighbor, so
@@ -201,68 +175,47 @@ struct DaySection: Identifiable {
     }
 }
 
-struct SearchField: View {
-    @Binding var text: String
-    var focused: FocusState<Bool>.Binding
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass").foregroundStyle(Palette.muted)
-            TextField("Search transcripts", text: $text).textFieldStyle(.plain).focused(focused)
-            if !text.isEmpty {
-                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.muted) }
-                    .buttonStyle(.plain).accessibilityLabel("Clear search")
-            } else {
-                Text("⌘F").font(.system(size: 10)).foregroundStyle(Palette.muted.opacity(0.7))
-            }
-        }.font(.system(size: 12)).padding(.horizontal, 11).frame(width: 250, height: 34)
-            .card(radius: 8, stroke: focused.wrappedValue ? Palette.accent.opacity(0.5) : Palette.line)
-            .onExitCommand { text = ""; focused.wrappedValue = false }
-    }
-}
-
-struct ToastView: View {
-    let message: String
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.green)
-            Text(message).font(.system(size: 12, weight: .medium)).lineLimit(2)
-        }.padding(.horizontal, 16).padding(.vertical, 11)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Palette.line, lineWidth: 1))
-            .shadow(color: .black.opacity(0.10), radius: 14, y: 5)
-            .accessibilityElement(children: .combine)
-    }
-}
+// MARK: Sidebar
 
 struct SidebarView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var speech: DictationEngine
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 9) {
-                WaveMark(size: 27)
-                Text("Murmur").font(.system(size: 17, weight: .semibold)).tracking(-0.3)
-            }.padding(.horizontal, 11).padding(.bottom, 34)
-            Text("Library").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
-                .padding(.horizontal, 12).padding(.bottom, 9)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                WaveMark(size: 20)
+                Text("Murmur").font(.system(size: 14, weight: .semibold))
+            }.padding(.horizontal, 10).padding(.top, 48).padding(.bottom, 14)
+
+            SidebarItem(title: speech.phase == .recording ? "Finish recording" : "New recording",
+                        symbol: speech.phase == .recording ? "stop.circle" : "mic", badge: "⌘N") { model.toggleRecording() }
+                .disabled(speech.phase.isBusy && speech.phase != .recording)
+            SidebarItem(title: "Search", symbol: "magnifyingglass", badge: "⌘F") {
+                NotificationCenter.default.post(name: .murmurSearch, object: nil)
+            }
+
+            Text("Library").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
+                .padding(.horizontal, 10).padding(.top, 20).padding(.bottom, 4)
             ForEach(LibraryFilter.allCases, id: \.self) { filter in
                 SidebarItem(title: filter.rawValue, symbol: symbol(for: filter), selected: model.filter == filter,
                             badge: filter == .all ? "\(model.savedCount)" : nil) {
                     model.filter = filter; model.selectedID = nil; model.search = ""
-                }.padding(.bottom, 3)
+                }
             }
-            Spacer()
-            HStack(spacing: 7) {
-                Image(systemName: "lock.shield").font(.system(size: 12))
-                Text("On-device transcription").font(.system(size: 10))
-            }.foregroundStyle(Palette.muted).padding(.horizontal, 11).padding(.bottom, 16)
-            Rectangle().fill(Palette.line).frame(height: 1).padding(.horizontal, 10).padding(.bottom, 9)
-            SidebarItem(title: "Settings", symbol: "gearshape", selected: false, badge: "⌘,") { model.showSettings = true }
-        }.padding(.horizontal, 12).padding(.top, 45).padding(.bottom, 17).background(Palette.sidebar)
+
+            Spacer(minLength: 16)
+            RecordingDock(model: model, speech: speech).padding(.bottom, 8)
+            Hairline().padding(.horizontal, 6).padding(.bottom, 6)
+            SidebarItem(title: "Settings", symbol: "gearshape", badge: "⌘,") { model.showSettings = true }
+        }.padding(.horizontal, 8).padding(.bottom, 10)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(Palette.sidebar)
     }
 
     private func symbol(for filter: LibraryFilter) -> String {
         switch filter {
-        case .all: return "doc.text"
+        case .all: return "tray.full"
         case .favorites: return "star"
         case .trash: return "trash"
         }
@@ -272,104 +225,131 @@ struct SidebarView: View {
 struct SidebarItem: View {
     let title: String
     let symbol: String
-    let selected: Bool
+    var selected = false
     var badge: String?
     let action: () -> Void
     @State private var hovered = false
+    @Environment(\.isEnabled) private var isEnabled
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: selected ? "\(symbol).fill" : symbol).font(.system(size: 13)).frame(width: 18)
-                Text(title).font(.system(size: 12, weight: selected ? .medium : .regular))
+            HStack(spacing: 8) {
+                Image(systemName: symbol).font(.system(size: 13.5)).frame(width: 18)
+                    .foregroundStyle(selected ? Palette.ink : Palette.muted)
+                Text(title).font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 0)
-                if let badge { Text(badge).font(.system(size: 10)).foregroundStyle(Palette.muted).monospacedDigit() }
-            }.foregroundStyle(selected ? Palette.ink : Palette.muted)
-                .padding(.horizontal, 11).frame(height: 34)
-                .background(selected ? Palette.surface : hovered ? Palette.line.opacity(0.45) : .clear,
-                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(selected ? Palette.line : .clear, lineWidth: 0.5))
+                if let badge {
+                    // Counts always show; shortcut hints appear on hover, like Notion.
+                    Text(badge).font(.system(size: 11)).foregroundStyle(Palette.faint).monospacedDigit()
+                        .opacity(hovered || selected || Int(badge) != nil ? 1 : 0)
+                }
+            }.foregroundStyle(selected ? Palette.ink : Palette.ink.opacity(0.82))
+                .padding(.horizontal, 10).frame(height: 28)
+                .background(selected ? Palette.selection : hovered && isEnabled ? Palette.hover : .clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .contentShape(Rectangle())
-        }.buttonStyle(.plain).onHover { hovered = $0 }
+        }.buttonStyle(.plain).onHover { hovered = $0 }.opacity(isEnabled ? 1 : 0.45)
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
-/// Observes the speech engine directly. It is the only part of the library
-/// window that redraws for meter, clock and live-text updates.
-struct RecordingStatusView: View {
+/// The sidebar's live recording status. It observes the speech engine directly,
+/// so meter and clock updates redraw only this small view.
+struct RecordingDock: View {
     @ObservedObject var model: AppModel
     @ObservedObject var speech: DictationEngine
-    private var recording: Bool { speech.phase == .recording }
-    private var primaryKey: Bool { model.preferences.fnEnabled && model.fnAvailable }
-    private var heading: String {
-        if recording { return "Recording" }
-        return speech.phase.isBusy ? speech.phase.label : "Ready to dictate"
+    @State private var pulse = false
+
+    private var dictationKeys: [String] {
+        model.preferences.fnEnabled && model.fnAvailable ? [model.preferences.dictationKey.keyCap] : ["⌃", "⌥", "Space"]
     }
-    private var instruction: String {
-        let preferences = model.preferences
-        switch speech.phase {
-        case .finishing:
-            return preferences.autoCopy ? "Finishing transcription. Text will copy when ready."
-                                        : "Finishing transcription. Your transcript will appear in the library."
-        case .downloading: return "Downloading the speech model…"
-        case .preparing: return "Connecting your microphone…"
-        case .recording:
-            if !speech.liveText.isEmpty { return speech.liveText }
-            return preferences.keepAudio ? "Speak naturally. Your audio is being saved." : "Speak naturally. Transcription runs on this Mac."
-        case .idle:
-            if primaryKey && preferences.fnBehavior == .hold { return "Hold \(preferences.dictationKey.name) to talk. Release to finish." }
-            return primaryKey ? "Press \(preferences.dictationKey.name) to start or finish." : "Use the shortcut or click Record to start."
+
+    var body: some View {
+        Group {
+            switch speech.phase {
+            case .recording: recording
+            case .idle: hints
+            default: working
+            }
+        }.animation(.easeOut(duration: 0.2), value: speech.phase)
+    }
+
+    private var hints: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            hintRow(model.preferences.fnBehavior == .hold && dictationKeys.count == 1 ? "Hold to dictate" : "Dictate", keys: dictationKeys)
+            hintRow("Paste last", keys: ["⌃", "⌥", "V"])
+        }.padding(.horizontal, 10).padding(.vertical, 4)
+    }
+
+    private func hintRow(_ title: String, keys: [String]) -> some View {
+        HStack {
+            Text(title).font(.system(size: 12)).foregroundStyle(Palette.muted)
+            Spacer()
+            ShortcutKeys(keys: keys)
         }
     }
 
-    var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous).fill(recording ? Palette.lilac : Palette.sidebar)
-                    .frame(width: 40, height: 40)
-                if recording {
-                    LiveWaveform(level: speech.level, bars: 7, color: Palette.accent, maxHeight: 22)
-                } else if speech.phase.isBusy {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "waveform").font(.system(size: 17)).foregroundStyle(Palette.muted)
-                }
+    private var recording: some View {
+        HStack(spacing: 10) {
+            Circle().fill(Palette.red).frame(width: 8, height: 8)
+                .opacity(pulse ? 0.35 : 1)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }.onDisappear { pulse = false }
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Recording").font(.system(size: 12.5, weight: .semibold))
+                Text(speech.clockLabel).font(.system(size: 11)).foregroundStyle(Palette.muted).monospacedDigit()
             }
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(heading).font(.system(size: 13, weight: .medium))
-                    if recording {
-                        Text(speech.clockLabel).font(.system(size: 11)).monospacedDigit().foregroundStyle(Palette.muted)
-                    }
-                }
-                Text(instruction).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.head)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            if !speech.phase.isBusy {
-                ShortcutKeys(keys: primaryKey ? [model.preferences.dictationKey.keyCap] : ["⌃", "⌥", "space"])
-            }
-        }.padding(.horizontal, 17).frame(height: 76)
-            .card(stroke: recording ? Palette.accent.opacity(0.45) : Palette.line)
-            .animation(.easeOut(duration: 0.2), value: speech.phase)
+            Spacer(minLength: 4)
+            LiveWaveform(level: speech.level, bars: 7, color: Palette.red, maxHeight: 18)
+            IconButton(symbol: "stop.fill", help: "Finish recording", tint: Palette.ink) { model.toggleRecording() }
+        }.padding(.leading, 12).padding(.trailing, 4).padding(.vertical, 6)
+            .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.line, lineWidth: 1))
+    }
+
+    private var working: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            Text(speech.phase == .finishing ? "Transcribing…" : speech.phase == .downloading
+                 ? "Downloading model · \(Int(speech.downloadProgress * 100))%" : "Getting ready…")
+                .font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+            Spacer()
+        }.padding(.horizontal, 12).frame(height: 44)
     }
 }
 
-struct EmptyLibraryView: View {
+// MARK: List
+
+struct SearchField: View {
+    @Binding var text: String
+    var focused: FocusState<Bool>.Binding
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Palette.muted)
+            TextField("Search", text: $text).textFieldStyle(.plain).focused(focused)
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.faint) }
+                    .buttonStyle(.plain).accessibilityLabel("Clear search")
+            }
+        }.font(.system(size: 13)).padding(.horizontal, 9).frame(height: 28)
+            .background(Palette.wash, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(focused.wrappedValue ? Palette.accent.opacity(0.55) : .clear, lineWidth: 1.5))
+            .onExitCommand { text = ""; focused.wrappedValue = false }
+    }
+}
+
+struct EmptyList: View {
     var searching: Bool
     var filter: LibraryFilter
-    var record: () -> Void
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: searching ? "magnifyingglass" : filter == .favorites ? "star" : filter == .trash ? "trash" : "waveform")
-                .font(.system(size: 26, weight: .light)).foregroundStyle(Palette.muted.opacity(0.7)).padding(.bottom, 4)
-            Text(searching ? "No matching transcripts" : filter == .favorites ? "No favorites yet" : filter == .trash ? "Trash is empty" : "No transcripts yet")
-                .font(.system(size: 15, weight: .medium))
-            Text(searching ? "Try another word or app name." : filter == .favorites ? "Star a transcript to add it here."
-                 : filter == .trash ? "Deleted transcripts will appear here." : "Use your shortcut in any app and speak. Your words land where you’re typing.")
-                .font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center).frame(maxWidth: 300)
-            if !searching && filter == .all {
-                Button("Record") { record() }.buttonStyle(CapsuleButtonStyle()).padding(.top, 5)
-            }
-        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity).card()
+        VStack(spacing: 6) {
+            Text(searching ? "No results" : filter == .favorites ? "No favorites yet" : filter == .trash ? "Trash is empty" : "No transcripts yet")
+                .font(.system(size: 13, weight: .medium))
+            Text(searching ? "Try another word or app name." : filter == .favorites ? "Star a transcript to keep it here."
+                 : filter == .trash ? "Deleted transcripts appear here." : "Your dictations will appear here.")
+                .font(.system(size: 12)).foregroundStyle(Palette.muted)
+        }.multilineTextAlignment(.center).padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -378,107 +358,209 @@ struct TranscriptRow: View {
     let selected: Bool
     let active: Bool
     let select: () -> Void
-    let favorite: () -> Void
     @State private var hovered = false
 
-    private var symbol: String {
-        if active { return "waveform" }
-        if entry.reviewReason != nil { return "ear" }
-        if entry.status == .failed || entry.status == .interrupted { return "exclamationmark.bubble" }
-        return "text.alignleft"
+    /// The second line continues the title, or explains a recording without text.
+    private var detail: String {
+        if active && entry.text.isEmpty { return "Listening…" }
+        if entry.reviewReason != nil { return "Needs review" }
+        if entry.status == .failed || entry.status == .interrupted, entry.text.isEmpty {
+            return entry.audioFile == nil ? "No audio captured" : "Not transcribed · audio kept"
+        }
+        return entry.preview.isEmpty ? entry.sourceApp : entry.preview
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Button(action: select) {
-                HStack(alignment: .top, spacing: 11) {
-                    Image(systemName: symbol)
-                        .font(.system(size: 14)).foregroundStyle(selected || active ? Palette.accent : Palette.muted)
-                        .symbolEffect(.variableColor.iterative, isActive: active)
-                        .frame(width: 28, height: 28).padding(.top, 1)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(entry.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        let preview = entry.preview
-                        if !preview.isEmpty {
-                            Text(preview).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1)
-                        }
-                        HStack(spacing: 5) {
-                            Text(entry.createdAt.formatted(.dateTime.hour().minute()))
-                            Text("·"); Text(entry.durationLabel); Text("·"); Text(entry.sourceApp)
-                            if entry.status == .interrupted || entry.status == .failed {
-                                Text(entry.audioFile == nil ? "· No audio captured" : "· Audio kept")
-                            }
-                        }.font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1)
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel(entry.title)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            Button(action: favorite) {
-                Image(systemName: entry.isFavorite ? "star.fill" : "star").font(.system(size: 11))
-                    .foregroundStyle(entry.isFavorite ? Palette.star : Palette.muted.opacity(hovered || selected ? 0.8 : 0))
-                    .frame(width: 23, height: 23).contentShape(Rectangle())
-            }.buttonStyle(.plain).help(entry.isFavorite ? "Remove from favorites" : "Add to favorites")
-                .accessibilityLabel(entry.isFavorite ? "Remove from favorites" : "Add to favorites")
-        }.padding(.horizontal, 10).padding(.vertical, 12)
-            .background(selected ? Palette.lilac : hovered ? Palette.sidebar.opacity(0.8) : .clear,
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .onHover { hovered = $0 }.accessibilityElement(children: .contain)
+        Button(action: select) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if active { Circle().fill(Palette.red).frame(width: 6, height: 6) }
+                    Text(entry.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if entry.isFavorite {
+                        Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(Palette.star)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text(entry.createdAt.formatted(.dateTime.hour().minute())).foregroundStyle(Palette.ink.opacity(0.7))
+                    Text(detail).foregroundStyle(Palette.muted).lineLimit(1)
+                }.font(.system(size: 12))
+            }.padding(.horizontal, 12).padding(.vertical, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(selected ? Palette.selection : hovered ? Palette.hover : .clear,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).onHover { hovered = $0 }
+            .accessibilityLabel(entry.title)
+            .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
-struct TranscriptDetail: View {
+// MARK: Page
+
+struct EmptyPage: View {
+    @ObservedObject var model: AppModel
+    private var holdHint: String {
+        let key = model.preferences.dictationKey.name
+        guard model.preferences.fnEnabled && model.fnAvailable else { return "Press Control-Option-Space in any app and speak." }
+        return model.preferences.fnBehavior == .hold ? "Hold \(key) in any app and speak. Let go, and your words land where you were typing."
+                                                     : "Press \(key) in any app and speak. Press it again to finish."
+    }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            WaveMark(size: 44).padding(.bottom, 4)
+            Text("Dictate anywhere").font(.system(size: 22, weight: .semibold)).tracking(-0.4)
+            Text(holdHint).font(.system(size: 13)).foregroundStyle(Palette.muted)
+                .multilineTextAlignment(.center).frame(maxWidth: 340).lineSpacing(2)
+            Button { model.toggleRecording() } label: { Label("New recording", systemImage: "mic.fill") }
+                .buttonStyle(PrimaryButtonStyle()).padding(.top, 6)
+                .disabled(model.speech.phase.isBusy)
+            if !model.transcripts.isEmpty {
+                Text("Or select a transcript to read and edit it.").font(.system(size: 12)).foregroundStyle(Palette.faint)
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct TranscriptPage: View {
     @ObservedObject var model: AppModel
     let entry: Transcript
     @State private var showOriginal = false
     @State private var confirmDelete = false
     @State private var copied = false
 
-    private var needsRetry: Bool { entry.status == .failed || entry.status == .interrupted || entry.reviewReason != nil }
     private var isActive: Bool { model.activeID == entry.id }
+    private var needsRetry: Bool {
+        entry.deletedAt == nil && !isActive && (entry.status == .failed || entry.status == .interrupted || entry.reviewReason != nil)
+    }
     private var text: Binding<String> {
         Binding(get: { model.transcripts.first(where: { $0.id == entry.id })?.text ?? "" },
                 set: { model.edit(entry.id, text: $0) })
     }
 
     var body: some View {
-        GeometryReader { bounds in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 15) {
-                    heading
-                    Rectangle().fill(Palette.line).frame(height: 1)
-                    if let reason = entry.reviewReason {
-                        Label(reason, systemImage: "ear.badge.waveform").font(.system(size: 11)).foregroundStyle(Palette.muted)
-                            .padding(10).background(Palette.sidebar, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    editor.frame(height: editorHeight(available: bounds.size.height))
-                    if entry.audioFile != nil { playback }
-                    if entry.deletedAt == nil && needsRetry { retry }
-                    actions
-                    footnote
-                }.padding(18).frame(maxWidth: .infinity, minHeight: bounds.size.height, alignment: .topLeading)
-            }.scrollIndicators(.hidden)
+        VStack(spacing: 0) {
+            if entry.deletedAt != nil { trashBanner }
+            topBar
+            VStack(alignment: .leading, spacing: 0) {
+                Text(entry.createdAt.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                    .font(.system(size: 30, weight: .bold)).tracking(-0.6).lineLimit(1)
+                    .padding(.bottom, 16)
+                properties
+                callouts
+                Hairline().padding(.vertical, 18)
+                editor.frame(minHeight: 120, maxHeight: .infinity)
+                footer.padding(.top, 10)
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 52).padding(.top, 14).padding(.bottom, 18)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .card()
         .alert("Permanently delete this transcript?", isPresented: $confirmDelete) {
             Button("Cancel", role: .cancel) {}
             Button("Delete permanently", role: .destructive) { model.permanentlyDelete(entry.id) }
         } message: { Text("This removes the transcript and its saved audio from Murmur.") }
-        .onChange(of: entry.id) { _, _ in showOriginal = false; confirmDelete = false; copied = false }
     }
 
-    private var heading: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Transcript").font(.system(size: 13, weight: .semibold))
-                Spacer()
-                SmallIconButton(symbol: "xmark", help: "Close transcript (Esc)") { model.selectedID = nil }
+    private var trashBanner: some View {
+        HStack(spacing: 12) {
+            Text("This transcript is in Trash.")
+            Button("Restore") { model.restore(entry.id) }.buttonStyle(BannerButtonStyle())
+            Button("Delete permanently") { confirmDelete = true }.buttonStyle(BannerButtonStyle())
+        }.font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+            .frame(maxWidth: .infinity).frame(height: 40).background(Palette.red)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 2) {
+            HStack(spacing: 6) {
+                Text(model.filter.rawValue).foregroundStyle(Palette.muted)
+                Text("/").foregroundStyle(Palette.faint)
+                Text(entry.title).lineLimit(1)
+            }.font(.system(size: 12.5)).padding(.leading, 8)
+            Spacer(minLength: 12)
+            if entry.deletedAt == nil {
+                IconButton(symbol: entry.isFavorite ? "star.fill" : "star",
+                           help: entry.isFavorite ? "Remove from favorites" : "Add to favorites",
+                           tint: entry.isFavorite ? Palette.star : Palette.muted) { model.favorite(entry.id) }
+                IconButton(symbol: copied ? "checkmark" : "doc.on.doc", help: "Copy text (⌘C)",
+                           tint: copied ? Palette.green : Palette.muted) {
+                    model.copy(entry.text)
+                    copied = true
+                    Task { try? await Task.sleep(for: .seconds(1.4)); copied = false }
+                }.disabled(entry.text.isEmpty)
+                IconButton(symbol: "square.and.arrow.up", help: "Export transcript") { model.export(entry) }
+                IconButton(symbol: "trash", help: "Move to Trash (⌫)") { model.trash(entry.id) }.disabled(isActive)
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text(entry.createdAt.formatted(.dateTime.month(.wide).day().hour().minute())).font(.system(size: 12, weight: .medium))
-                HStack(spacing: 6) {
-                    Text("\(entry.wordCount) words"); Text("·"); Text(entry.durationLabel); Text("·"); Text(entry.sourceApp)
-                    if let engine = entry.engineName { Text("·"); Text(engine) }
-                }.font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1)
+        }.padding(.horizontal, 10).frame(height: 52)
+    }
+
+    private var properties: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if isActive {
+                property("Status", symbol: "circle.dotted") {
+                    HStack(spacing: 6) {
+                        Circle().fill(Palette.red).frame(width: 6, height: 6)
+                        Text(model.speech.phase == .recording ? "Recording" : "Transcribing…")
+                    }
+                }
+            }
+            property("Created", symbol: "clock") { Text(entry.createdAt.formatted(.dateTime.hour().minute())) }
+            property("Source", symbol: "macwindow") { Text(entry.sourceApp) }
+            property("Words", symbol: "text.alignleft") { Text("\(entry.wordCount)").monospacedDigit() }
+            if let engine = entry.engineName { property("Engine", symbol: "cpu") { Text(engine) } }
+            if entry.audioFile != nil {
+                property("Audio", symbol: "waveform") { player }
+            } else {
+                property("Duration", symbol: "timer") { Text(entry.durationLabel).monospacedDigit() }
+            }
+        }
+    }
+
+    private func property<Value: View>(_ name: String, symbol: String, @ViewBuilder value: () -> Value) -> some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol).font(.system(size: 12)).frame(width: 16)
+                Text(name)
+            }.foregroundStyle(Palette.muted).frame(width: 132, alignment: .leading)
+            value()
+            Spacer(minLength: 0)
+        }.font(.system(size: 13)).frame(height: 30)
+    }
+
+    private var player: some View {
+        HStack(spacing: 10) {
+            Button { model.togglePlayback(entry) } label: {
+                Image(systemName: model.playingID == entry.id ? "pause.fill" : "play.fill").font(.system(size: 9))
+                    .foregroundStyle(Palette.ink).frame(width: 22, height: 22)
+                    .background(Palette.wash, in: Circle())
+            }.buttonStyle(.plain)
+                .help(model.playingID == entry.id ? "Pause" : "Play recording")
+                .accessibilityLabel(model.playingID == entry.id ? "Pause recording" : "Play recording")
+                .disabled(model.activeID != nil)
+            ProgressView(value: model.playingID == entry.id ? model.playbackProgress : 0)
+                .progressViewStyle(.linear).tint(Palette.ink.opacity(0.6)).frame(maxWidth: 180)
+            Text(entry.durationLabel).foregroundStyle(Palette.muted).monospacedDigit()
+        }
+    }
+
+    @ViewBuilder private var callouts: some View {
+        if let reason = entry.reviewReason {
+            Callout(symbol: "ear", tint: Palette.star) { Text(reason).fixedSize(horizontal: false, vertical: true) }
+                .padding(.top, 14)
+        }
+        if needsRetry {
+            if entry.audioFile != nil {
+                Callout(symbol: "arrow.clockwise") {
+                    Text(entry.text.isEmpty ? "This recording hasn’t been transcribed yet." : "Run transcription again on the saved audio.")
+                    Button("Transcribe saved audio") { model.retry(entry) }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .disabled(model.speech.phase.isBusy || model.activeID != nil)
+                }.padding(.top, 10)
+            } else {
+                Callout(symbol: "mic.slash") { Text("No audio was captured. Check microphone access before recording again.") }
+                    .padding(.top, 10)
             }
         }
     }
@@ -486,80 +568,57 @@ struct TranscriptDetail: View {
     @ViewBuilder private var editor: some View {
         if showOriginal {
             ScrollView {
-                Text(entry.originalText).font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
+                Text(entry.originalText).font(.system(size: 15)).lineSpacing(6).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            }.scrollIndicators(.automatic)
         } else {
             TextEditor(text: text)
-                .font(.system(size: 14)).lineSpacing(6).scrollContentBackground(.hidden)
+                .font(.system(size: 15)).lineSpacing(6).scrollContentBackground(.hidden)
+                .padding(.horizontal, -5)
                 .disabled(isActive || entry.deletedAt != nil)
+                .overlay(alignment: .topLeading) {
+                    if entry.text.isEmpty {
+                        Text(isActive ? "Your words will appear here as you speak." : "Nothing was transcribed.")
+                            .font(.system(size: 15)).foregroundStyle(Palette.faint).allowsHitTesting(false)
+                    }
+                }
                 .accessibilityLabel("Transcript text, edits save automatically")
         }
     }
 
-    private var playback: some View {
-        HStack(spacing: 10) {
-            Button { model.togglePlayback(entry) } label: {
-                Image(systemName: model.playingID == entry.id ? "pause.fill" : "play.fill").font(.system(size: 10))
-                    .foregroundStyle(Palette.ink).frame(width: 27, height: 27).contentShape(Rectangle())
-            }.buttonStyle(.plain).help("Play recording")
-                .accessibilityLabel(model.playingID == entry.id ? "Pause recording" : "Play recording")
-                .disabled(model.activeID != nil)
-            ProgressView(value: model.playingID == entry.id ? model.playbackProgress : 0).tint(Palette.accent)
-            Text(entry.durationLabel).font(.system(size: 10)).monospacedDigit().foregroundStyle(Palette.muted)
-        }.padding(.horizontal, 8).padding(.vertical, 6)
-            .background(Palette.sidebar.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    @ViewBuilder private var retry: some View {
-        if entry.audioFile != nil {
-            Button { model.retry(entry) } label: { Label("Transcribe saved audio", systemImage: "arrow.clockwise") }
-                .buttonStyle(CapsuleButtonStyle()).disabled(model.speech.phase.isBusy || model.activeID != nil)
-        } else {
-            Text("No audio was captured. Check microphone access before recording again.")
-                .font(.system(size: 11)).foregroundStyle(Palette.muted)
-        }
-    }
-
-    private var actions: some View {
-        HStack(spacing: 8) {
-            if entry.deletedAt != nil {
-                Button { model.restore(entry.id) } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
-                    .buttonStyle(CapsuleButtonStyle(prominent: true))
-                Spacer()
-                SmallIconButton(symbol: "trash", help: "Delete permanently") { confirmDelete = true }
-            } else {
-                Button {
-                    model.copy(entry.text)
-                    copied = true
-                    Task { try? await Task.sleep(for: .seconds(1.4)); copied = false }
-                } label: {
-                    Label(copied ? "Copied" : "Copy text", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .contentTransition(.symbolEffect(.replace))
-                }.buttonStyle(CapsuleButtonStyle(prominent: true)).disabled(entry.text.isEmpty)
-                Spacer()
-                SmallIconButton(symbol: "square.and.arrow.up", help: "Export transcript") { model.export(entry) }
-                SmallIconButton(symbol: "trash", help: "Move to Trash (⌫)") { model.trash(entry.id) }.disabled(isActive)
+    private var footer: some View {
+        HStack {
+            Text(isActive ? "Saving while you speak" : entry.deletedAt != nil ? "Restore to edit" : "Edits save automatically")
+                .font(.system(size: 11)).foregroundStyle(Palette.faint)
+            Spacer()
+            if entry.text != entry.originalText && !entry.originalText.isEmpty {
+                Button(showOriginal ? "Show edited text" : "Show original") { showOriginal.toggle() }
+                    .buttonStyle(QuietButtonStyle())
             }
         }
     }
+}
 
-    @ViewBuilder private var footnote: some View {
-        if entry.text != entry.originalText && !entry.originalText.isEmpty {
-            Button(showOriginal ? "Show edited text" : "Show original transcript") { showOriginal.toggle() }
-                .font(.system(size: 10)).foregroundStyle(Palette.muted).buttonStyle(.plain)
-        } else {
-            Text(isActive ? "Saving while you speak" : "Edits save automatically")
-                .font(.system(size: 10)).foregroundStyle(Palette.muted)
-        }
+/// White outlined button for use on the red Trash banner.
+struct BannerButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white)
+            .padding(.horizontal, 10).frame(height: 26)
+            .background(.white.opacity(configuration.isPressed ? 0.25 : 0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.55), lineWidth: 1))
     }
+}
 
-    /// The editor takes whatever height the other controls leave, with a usable minimum.
-    private func editorHeight(available: CGFloat) -> CGFloat {
-        var controls: CGFloat = 250
-        if entry.audioFile != nil { controls += 54 }
-        if needsRetry { controls += 50 }
-        if entry.reviewReason != nil { controls += 80 }
-        return max(180, available - controls)
+struct ToastView: View {
+    let message: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.white.opacity(0.85))
+            Text(message).lineLimit(2)
+        }.font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(Color(hex: 0x2F2F2F), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
+            .accessibilityElement(children: .combine)
     }
 }

@@ -131,15 +131,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func makeWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 790),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 760),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = model.isPreview ? "Murmur · Preview" : "Murmur"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 940, height: 670)
-        window.backgroundColor = .adaptive(light: 0xFAFAFB, dark: 0x1B1C1F)
+        window.minSize = NSSize(width: 980, height: 640)
+        window.backgroundColor = .adaptive(light: 0xFFFFFF, dark: 0x191919)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.delegate = self
         window.setFrameAutosaveName(model.isPreview ? "MurmurPreview" : "MurmurMain")

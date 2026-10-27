@@ -1,22 +1,31 @@
 import SwiftUI
 import AppKit
 
-/// Semantic colors that follow the system appearance.
+/// Warm, quiet neutrals in the spirit of Notion, set in Apple's system type.
+/// Every color follows the system appearance.
 enum Palette {
-    static let ink = Color(light: 0x20242B, dark: 0xECEDEF)
-    static let muted = Color(light: 0x6B727B, dark: 0x9BA0A8)
-    static let accent = Color(light: 0x3766CC, dark: 0x4C7EE0)
-    static let lilac = Color(light: 0xEDF2FC, dark: 0x1F2A40)
-    static let canvas = Color(light: 0xFAFAFB, dark: 0x1B1C1F)
-    static let surface = Color(light: 0xFFFFFF, dark: 0x242529)
-    static let sidebar = Color(light: 0xF0F1F3, dark: 0x161719)
-    static let line = Color(light: 0xE2E5E9, dark: 0x34363B)
-    static let green = Color(light: 0x397859, dark: 0x6FC096)
-    static let star = Color(light: 0xB58B3B, dark: 0xE0B65C)
+    /// Primary text.
+    static let ink = Color(light: 0x37352F, dark: 0xE3E2E0)
+    /// Secondary text and icons.
+    static let muted = Color(light: 0x787774, dark: 0x9B9A97)
+    /// Placeholders and the faintest labels.
+    static let faint = Color(light: 0xA9A8A4, dark: 0x5F5E5B)
+    static let accent = Color(light: 0x2383E2, dark: 0x3291EF)
+    /// The page and list background.
+    static let canvas = Color(light: 0xFFFFFF, dark: 0x191919)
+    static let sidebar = Color(light: 0xF7F7F5, dark: 0x202020)
+    static let line = Color(light: 0xEDEDEC, dark: 0x2F2F2F)
+    static let hover = Color(light: 0xEFEFED, dark: 0x2C2C2C)
+    static let selection = Color(light: 0xEAEAE8, dark: 0x323232)
+    /// Callout blocks and search fields.
+    static let wash = Color(light: 0xF1F1EF, dark: 0x252525)
+    static let green = Color(light: 0x448361, dark: 0x4DAB9A)
+    static let red = Color(light: 0xE03E3E, dark: 0xEB5757)
+    static let star = Color(light: 0xCB912F, dark: 0xCA9849)
     /// The recording pill is always dark, on any desktop.
-    static let pill = Color(hex: 0x17191D)
-    static let pillMeter = Color(hex: 0xAFC4F5)
-    static let pillSuccess = Color(hex: 0x96C8AA)
+    static let pill = Color(hex: 0x1F1F1F)
+    static let pillMeter = Color(hex: 0xB7CDF5)
+    static let pillSuccess = Color(hex: 0x7FC4A6)
 }
 
 extension NSColor {
@@ -40,69 +49,81 @@ extension Notification.Name {
     static let murmurSearch = Notification.Name("app.murmur.search")
 }
 
-/// A bordered card used for every panel in the library and settings.
-struct CardBackground: ViewModifier {
-    var radius: CGFloat = 10
-    var stroke: Color = Palette.line
-    func body(content: Content) -> some View {
-        content
-            .background(Palette.surface, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(stroke, lineWidth: 1))
+/// A thin rule between regions.
+struct Hairline: View {
+    var vertical = false
+    var body: some View {
+        Rectangle().fill(Palette.line).frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
     }
 }
 
-extension View {
-    func card(radius: CGFloat = 10, stroke: Color = Palette.line) -> some View {
-        modifier(CardBackground(radius: radius, stroke: stroke))
-    }
-}
-
-struct CapsuleButtonStyle: ButtonStyle {
-    var prominent = false
+/// Filled accent button for the one primary action in a region.
+struct PrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.font(.system(size: 12, weight: .medium))
-            .foregroundStyle(prominent ? Color.white : Palette.ink)
-            .padding(.horizontal, 14).frame(height: 34)
-            .background(prominent ? Palette.accent : Palette.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(prominent ? Color.clear : Palette.line, lineWidth: 1))
-            .opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.45)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+        configuration.label.font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).frame(height: 30)
+            .background(Palette.accent.opacity(configuration.isPressed ? 0.85 : 1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .opacity(isEnabled ? 1 : 0.45)
     }
 }
 
-struct SmallIconButton: View {
+/// Text button that shows a soft fill only on hover, like Notion's toolbar.
+struct QuietButtonStyle: ButtonStyle {
+    var tint: Color = Palette.muted
+    func makeBody(configuration: Configuration) -> some View {
+        QuietButtonBody(configuration: configuration, tint: tint)
+    }
+    private struct QuietButtonBody: View {
+        let configuration: Configuration
+        let tint: Color
+        @State private var hovered = false
+        @Environment(\.isEnabled) private var isEnabled
+        var body: some View {
+            configuration.label.font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(hovered && isEnabled ? Palette.ink : tint)
+                .padding(.horizontal, 8).frame(minHeight: 26)
+                .background(configuration.isPressed ? Palette.selection : hovered && isEnabled ? Palette.hover : .clear,
+                            in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .contentShape(Rectangle())
+                .opacity(isEnabled ? 1 : 0.4)
+                .onHover { hovered = $0 }
+        }
+    }
+}
+
+struct IconButton: View {
     var symbol: String
     var help: String
+    var tint: Color = Palette.muted
     var action: () -> Void
     @State private var hovered = false
     @Environment(\.isEnabled) private var isEnabled
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 13))
-                .foregroundStyle(hovered && isEnabled ? Palette.ink : Palette.muted)
-                .frame(width: 30, height: 30)
-                .background(hovered && isEnabled ? Palette.line.opacity(0.6) : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Image(systemName: symbol).font(.system(size: 13.5))
+                .foregroundStyle(hovered && isEnabled ? Palette.ink : tint)
+                .frame(width: 28, height: 28)
+                .background(hovered && isEnabled ? Palette.hover : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .contentShape(Rectangle())
-        }.buttonStyle(.plain).opacity(isEnabled ? 1 : 0.4)
+        }.buttonStyle(.plain).opacity(isEnabled ? 1 : 0.35)
             .help(help).accessibilityLabel(help).onHover { hovered = $0 }
     }
 }
 
+/// Small keyboard keycaps, e.g. ⌃ ⌥ Space.
 struct ShortcutKeys: View {
-    var keys: [String] = ["⌃", "⌥", "space"]
+    var keys: [String] = ["⌃", "⌥", "Space"]
     var light = false
     var body: some View {
         HStack(spacing: 3) {
             ForEach(keys, id: \.self) { key in
-                Text(key).font(.system(size: key.count > 1 ? 10 : 12, weight: .medium))
-                    .padding(.horizontal, key.count > 1 ? 7 : 6).frame(minWidth: 23, minHeight: 23)
-                    .background(light ? Color.white.opacity(0.10) : Palette.surface, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(light ? Color.white.opacity(0.12) : Palette.line, lineWidth: 1))
-                    .shadow(color: .black.opacity(light ? 0 : 0.04), radius: 0, y: 1)
+                Text(key).font(.system(size: key.count > 1 ? 10 : 11, weight: .medium))
+                    .padding(.horizontal, key.count > 1 ? 6 : 0).frame(minWidth: 20, minHeight: 20)
+                    .background(light ? Color.white.opacity(0.10) : Palette.canvas, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(light ? Color.white.opacity(0.14) : Palette.line, lineWidth: 1))
             }
         }.foregroundStyle(light ? Color.white.opacity(0.85) : Palette.muted)
             .accessibilityElement(children: .ignore)
@@ -118,8 +139,24 @@ struct WaveMark: View {
                 Capsule().fill(Palette.canvas).frame(width: size * 0.075, height: size * [0.22, 0.42, 0.60, 0.42, 0.22][index])
             }
         }.frame(width: size, height: size)
-            .background(Palette.ink, in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+            .background(Palette.ink, in: RoundedRectangle(cornerRadius: size * 0.26, style: .continuous))
             .accessibilityHidden(true)
+    }
+}
+
+/// A Notion-style callout: a tinted block with an icon and content.
+struct Callout<Content: View>: View {
+    let symbol: String
+    var tint: Color = Palette.muted
+    var background: Color = Palette.wash
+    @ViewBuilder let content: Content
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 13)).foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 8) { content }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }.font(.system(size: 13)).padding(.horizontal, 14).padding(.vertical, 12)
+            .background(background, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
