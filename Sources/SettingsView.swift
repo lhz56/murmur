@@ -27,6 +27,7 @@ struct SettingsView: View {
     @State private var pane: Pane
     @State private var heardWord = ""
     @State private var desiredWord = ""
+    @StateObject private var login = LaunchAtLogin()
 
     init(model: AppModel, preferences: Preferences, speech: DictationEngine, microphoneCheck: MicrophoneCheck, initialPane: Pane = .shortcut) {
         self.model = model; self.preferences = preferences; self.speech = speech; self.microphoneCheck = microphoneCheck
@@ -54,8 +55,8 @@ struct SettingsView: View {
         .frame(width: 780, height: 600)
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshPermissions() }
-        .onAppear { model.refreshPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshPermissions(); login.refresh() }
+        .onAppear { model.refreshPermissions(); login.refresh() }
         .onDisappear { microphoneCheck.stop() }
         .onChange(of: pane) { _, _ in microphoneCheck.stop() }
         .onChange(of: preferences.microphoneUID) { _, _ in microphoneCheck.stop() }
@@ -144,6 +145,18 @@ struct SettingsView: View {
             LabeledContent("Paste last transcript") { ShortcutKeys(keys: ["⌃", "⌥", "V"]) }
             LabeledContent("Stop and keep a recording") { ShortcutKeys(keys: ["Esc"]) }
         } header: { Text("Always available") }
+        Section {
+            Toggle(isOn: Binding(get: { login.isEnabled }, set: { login.set($0) })) {
+                Text("Open at login")
+                Text("Start Murmur quietly in the menu bar when you log in, so the shortcut always works.")
+            }
+            if login.needsApproval {
+                LabeledContent("Waiting for approval in System Settings") {
+                    Button("Open Login Items…") { login.openSystemSettings() }
+                }
+            }
+            if let error = login.error { Text(error).foregroundStyle(Palette.red) }
+        }
     }
 
     @ViewBuilder private var microphonePane: some View {

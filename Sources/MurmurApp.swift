@@ -62,6 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var permissionTimer: Timer?
     private var subscriptions = Set<AnyCancellable>()
     let model = AppModel(preview: CommandLine.arguments.contains("--preview"))
+    private var launchedAtLogin = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        launchedAtLogin = LaunchAtLogin.launchedAsLoginItem
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -122,7 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !model.isPreview, shortcut.register() != noErr {
             model.errorMessage = "Control Option Space is already used by another app. Close that app to use Murmur’s global shortcut. Recording from Murmur still works."
         }
-        openLibrary()
+        // At login, start quietly in the menu bar; the shortcut is what matters.
+        if !launchedAtLogin { openLibrary() }
         if model.isPreview && CommandLine.arguments.contains("--island-preview") { previewIsland() }
         if CommandLine.arguments.contains("--smoke-test") {
             print("MURMUR_SMOKE_OK: window=\(window.frame.width)x\(window.frame.height), history=\(model.transcripts.count), root=\(model.storage.root.path)")
