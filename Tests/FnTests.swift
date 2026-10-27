@@ -168,5 +168,32 @@ import CoreGraphics
         print("PASS: Fn+Space event decoding without Fn-down, repeat suppression, key releases, and hands-free stop")
         print("PASS: Fn double-tap hands-free start, release latching, stop gesture, timing, and actual-signal callbacks")
         print("PASS: Control hold/release, ignored short taps, explicit toggle mode, immediate release, global modifier polling, duplicate suppression, and early/late Control chords")
+
+        let option = FnShortcut()
+        option.trigger = { .rightOption }
+        var optionTime: TimeInterval = 50
+        option.clock = { optionTime }
+        var optionActions: [FnKeyState.Action] = []
+        option.onAction = { optionActions.append($0) }
+        let leftOption: CGEventFlags = [.maskAlternate, CGEventFlags(rawValue: 0x20)]
+        let rightOption: CGEventFlags = [.maskAlternate, CGEventFlags(rawValue: 0x40)]
+        option.sampleControl(flags: leftOption, keyDownCount: 7)
+        optionTime += 0.5
+        option.sampleControl(flags: leftOption, keyDownCount: 7)
+        option.sampleControl(flags: [], keyDownCount: 7)
+        assert(optionActions.isEmpty) // Left Option keeps its normal job.
+        option.sampleControl(flags: rightOption, keyDownCount: 7)
+        optionTime += 0.2
+        option.sampleControl(flags: rightOption, keyDownCount: 7)
+        option.sampleControl(flags: [], keyDownCount: 7)
+        assert(optionActions == [.startHold, .finishHold])
+        optionActions = []
+        option.sampleControl(flags: rightOption, keyDownCount: 7)
+        option.sampleControl(flags: rightOption.union(.maskShift), keyDownCount: 7)
+        optionTime += 0.2
+        option.sampleControl(flags: rightOption, keyDownCount: 7)
+        option.sampleControl(flags: [], keyDownCount: 7)
+        assert(optionActions.isEmpty) // Right Option chords are left to the app.
+        print("PASS: Right Option hold ignores Left Option and chords")
     }
 }

@@ -151,7 +151,7 @@ final class HistoryStorage {
 
 enum TextTools {
     /// Conservative formatting; never changes the meaning or removes arbitrary words.
-    static func clean(_ text: String, replacements: String = "", removeFillers: Bool = false) -> String {
+    static func clean(_ text: String, replacements: String = "", removeFillers: Bool = false, voiceCommands: Bool = false) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if removeFillers { result = withoutFillers(result) }
         result = result.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
@@ -166,6 +166,7 @@ enum TextTools {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: NSRegularExpression.escapedTemplate(for: desired))
             }
         }
+        if voiceCommands { result = applyingVoiceCommands(result) }
         return result
     }
 
@@ -194,6 +195,26 @@ enum TextTools {
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         // A recording that was only "Um." leaves nothing worth inserting.
         return result.contains(where: { $0.isLetter || $0.isNumber }) ? result : ""
+    }
+
+    /// Spoken "new line" and "new paragraph" become line breaks. The comma or
+    /// period the recognizer puts around a command is dropped with it.
+    private static let command = try! NSRegularExpression(
+        pattern: "(?i)[,;]?[ \\t]*(?<![\\p{L}\\p{N}])new (line|paragraph)(?![\\p{L}\\p{N}])[.,;:!?]?[ \\t]*")
+
+    static func applyingVoiceCommands(_ text: String) -> String {
+        var result = text
+        for match in command.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result), let kind = Range(match.range(at: 1), in: result) else { continue }
+            let breaks = result[kind].lowercased() == "line" ? "\n" : "\n\n"
+            let offset = result.distance(from: result.startIndex, to: range.lowerBound) + breaks.count
+            result.replaceSubrange(range, with: breaks)
+            let start = result.index(result.startIndex, offsetBy: offset)
+            if start < result.endIndex, result[start].isLowercase {
+                result.replaceSubrange(start...start, with: result[start].uppercased())
+            }
+        }
+        return result
     }
 
     /// Adds a space when dictation lands right after a word, so two dictations

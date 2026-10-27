@@ -13,6 +13,10 @@ A native Mac dictation app with local transcription, a searchable recording libr
 - Local Parakeet, Apple, and Whisper speech engines, with vocabulary corrections.
 - Optional filler-word cleanup (um, uh, erm) for English, and automatic spacing when you dictate right after existing text.
 - Open at login: Murmur starts quietly in the menu bar.
+- Voice commands: say "new line" or "new paragraph" (English).
+- Lowers other audio while you record, then fades it back.
+- Dictation key: Control, Right Option, Right Command, or Fn.
+- A first-run welcome guide for permissions and a live try-it step (Murmur menu → Welcome Guide).
 - Microphone selection and input testing, shortcut testing, and a no-audio insertion check.
 
 ## Requirements

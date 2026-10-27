@@ -17,6 +17,9 @@ final class Preferences: ObservableObject {
     @Published var sounds: Bool { didSet { defaults.set(sounds, forKey: "sounds") } }
     @Published var vocabulary: String { didSet { defaults.set(vocabulary, forKey: "vocabulary") } }
     @Published var removeFillers: Bool { didSet { defaults.set(removeFillers, forKey: "removeFillers") } }
+    @Published var voiceCommands: Bool { didSet { defaults.set(voiceCommands, forKey: "voiceCommands") } }
+    @Published var duckAudio: Bool { didSet { defaults.set(duckAudio, forKey: "duckAudio") } }
+    @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: "onboarded") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
     @Published var dictationKey: DictationKey { didSet { defaults.set(dictationKey.rawValue, forKey: "dictationKey") } }
@@ -31,6 +34,9 @@ final class Preferences: ObservableObject {
         sounds = defaults.object(forKey: "sounds") as? Bool ?? true
         vocabulary = defaults.string(forKey: "vocabulary") ?? ""
         removeFillers = defaults.object(forKey: "removeFillers") as? Bool ?? true
+        voiceCommands = defaults.object(forKey: "voiceCommands") as? Bool ?? true
+        duckAudio = defaults.object(forKey: "duckAudio") as? Bool ?? true
+        onboarded = defaults.bool(forKey: "onboarded")
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
         dictationKey = DictationKey(rawValue: defaults.string(forKey: "dictationKey") ?? "") ?? .control
@@ -39,6 +45,7 @@ final class Preferences: ObservableObject {
     }
     /// Filler cleanup is English-only: "um" is a real word in German.
     var cleansFillers: Bool { removeFillers && locale.hasPrefix("en") }
+    var usesVoiceCommands: Bool { voiceCommands && locale.hasPrefix("en") }
 }
 
 @MainActor
@@ -58,6 +65,7 @@ final class AppModel: ObservableObject {
     @Published var selectedID: UUID?
     @Published var activeID: UUID?
     @Published var showSettings = false
+    @Published var showOnboarding = false
     @Published var errorMessage: String?
     @Published var toast: String?
     @Published var playingID: UUID?
@@ -344,7 +352,7 @@ final class AppModel: ObservableObject {
         do {
             let original = try await speech.stop()
             guard activeID == id, !Task.isCancelled else { return }
-            let text = TextTools.clean(original, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers)
+            let text = TextTools.clean(original, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers, voiceCommands: preferences.usesVoiceCommands)
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
@@ -604,6 +612,7 @@ final class AppModel: ObservableObject {
         let engine = preferences.recognitionEngine
         let vocabulary = preferences.vocabulary
         let removeFillers = preferences.cleansFillers
+        let voiceCommands = preferences.usesVoiceCommands
         activeID = entry.id; selectedID = entry.id
         errorMessage = nil
         recordingTask = Task {
@@ -612,7 +621,7 @@ final class AppModel: ObservableObject {
             do {
                 let original = try await speech.transcribeFile(url, localeID: locale, recognitionEngine: engine, vocabulary: vocabulary)
                 guard !Task.isCancelled, activeID == entry.id else { return }
-                updateActive(text: TextTools.clean(original, replacements: vocabulary, removeFillers: removeFillers), duration: speech.elapsed,
+                updateActive(text: TextTools.clean(original, replacements: vocabulary, removeFillers: removeFillers, voiceCommands: voiceCommands), duration: speech.elapsed,
                              status: original.isEmpty ? .failed : .complete)
                 if let i = index(entry.id) { transcripts[i].originalText = original }
                 if let i = index(entry.id) {

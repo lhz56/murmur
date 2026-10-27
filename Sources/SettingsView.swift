@@ -95,8 +95,9 @@ struct SettingsView: View {
 
     private var shortcutInstruction: String {
         if preferences.dictationKey == .fn { return "Hold Fn to record, then release to finish. Double-tap Fn or press Fn + Space for hands-free recording." }
-        if preferences.fnBehavior == .hold { return "Hold Control to record, then release to finish. Short taps are ignored." }
-        return "Tap Control to record. Tap again to finish."
+        let key = preferences.dictationKey.name
+        if preferences.fnBehavior == .hold { return "Hold \(key) to record, then release to finish. Short taps are ignored." }
+        return "Tap \(key) to record. Tap again to finish."
     }
 
     @ViewBuilder private var shortcutPane: some View {
@@ -124,7 +125,7 @@ struct SettingsView: View {
                 } label: {
                     Label {
                         Text(model.fnAvailable ? (model.fnSignalSeen ? "\(preferences.dictationKey.name) detected" : "Shortcut ready") : "Accessibility permission required")
-                        Text(preferences.dictationKey == .control ? "Control combinations keep working normally."
+                        Text(preferences.dictationKey.isModifierHold ? "\(preferences.dictationKey.name) shortcuts keep working normally."
                              : model.fnAvailable ? "Check that this keyboard sends an Fn signal." : "Allow Accessibility access to use Fn in other apps.")
                     } icon: {
                         Image(systemName: model.fnSignalSeen ? "checkmark.circle.fill" : "keyboard")
@@ -233,6 +234,10 @@ struct SettingsView: View {
                 Text("Remove filler words")
                 Text("Drop “um”, “uh” and “erm” from English transcripts. The original stays in your library.")
             }
+            Toggle(isOn: $preferences.voiceCommands) {
+                Text("Voice commands")
+                Text("Say “new line” or “new paragraph” to break the text. English only.")
+            }
             Toggle(isOn: $preferences.autoPaste) {
                 Text("Insert into active app")
                 Text("Paste the transcript at your cursor when recording finishes.")
@@ -278,6 +283,10 @@ struct SettingsView: View {
             Toggle(isOn: $preferences.sounds) {
                 Text("Recording sounds")
                 Text("Play a soft chime when recording starts and stops.")
+            }
+            Toggle(isOn: $preferences.duckAudio) {
+                Text("Lower other audio while recording")
+                Text("Turns music and videos down while you talk, then back up.")
             }
             if preferences.sounds {
                 LabeledContent("Preview") {

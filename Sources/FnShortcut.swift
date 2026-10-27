@@ -5,9 +5,39 @@ import Carbon
 
 enum FnBehavior: String, CaseIterable { case hold = "Hold to talk", toggle = "Press to toggle" }
 enum DictationKey: String, CaseIterable {
-    case control = "Control", fn = "Fn / Globe"
-    var keyCap: String { self == .control ? "⌃" : "fn" }
-    var name: String { self == .control ? "Control" : "Fn" }
+    case control = "Control", rightOption = "Right Option", rightCommand = "Right Command", fn = "Fn / Globe"
+    var keyCap: String {
+        switch self {
+        case .control: return "⌃"
+        case .rightOption: return "Right ⌥"
+        case .rightCommand: return "Right ⌘"
+        case .fn: return "fn"
+        }
+    }
+    var name: String { self == .fn ? "Fn" : rawValue }
+    /// Modifier-only keys are watched without swallowing any events, so every
+    /// normal shortcut that uses the key keeps working.
+    var isModifierHold: Bool { self != .fn }
+    /// The flag that is set while this key is down. Right-hand keys use the
+    /// device-specific bits so the left key keeps its usual job.
+    var flag: CGEventFlags {
+        switch self {
+        case .control: return .maskControl
+        case .rightOption: return CGEventFlags(rawValue: 0x40)
+        case .rightCommand: return CGEventFlags(rawValue: 0x10)
+        case .fn: return .maskSecondaryFn
+        }
+    }
+    /// Modifiers that turn a hold into a chord, e.g. Right Option + Shift.
+    var otherModifiers: CGEventFlags {
+        let all: CGEventFlags = [.maskControl, .maskCommand, .maskAlternate, .maskShift, .maskSecondaryFn]
+        switch self {
+        case .control: return all.subtracting(.maskControl)
+        case .rightOption: return all.subtracting(.maskAlternate)
+        case .rightCommand: return all.subtracting(.maskCommand)
+        case .fn: return all.subtracting(.maskSecondaryFn)
+        }
+    }
 }
 
 /// Pure key state, kept separate from the system hook so timing and chord behavior can be tested.
@@ -118,7 +148,7 @@ final class FnShortcut {
             guard let self, let cgEvent = event.cgEvent else { return event }
             return handle(type: cgEvent.type, event: cgEvent) ? nil : event
         }
-        onAvailability?(trigger() == .control)
+        onAvailability?(trigger().isModifierHold)
     }
 
     private enum ControlPolling { case off, watch, fast }
@@ -128,7 +158,7 @@ final class FnShortcut {
     /// poll the modifier state instead. Flags and counters contain no typed text.
     private func updateControlPolling() {
         let wanted: ControlPolling
-        if !enabled() || trigger() != .control { wanted = .off }
+        if !enabled() || !trigger().isModifierHold { wanted = .off }
         else if tap == nil || IsSecureEventInputEnabled() { wanted = .fast }
         else { wanted = .watch }
         guard wanted != controlPolling else { return }
@@ -169,14 +199,15 @@ final class FnShortcut {
     }
 
     func sampleControl(flags: CGEventFlags, keyDownCount: UInt32) {
-        guard enabled(), trigger() == .control else { return }
+        let key = trigger()
+        guard enabled(), key.isModifierHold else { return }
         defer { previousControlCount = keyDownCount }
-        if let key = releaseRequiredFor {
-            if flags.contains(key == .control ? .maskControl : .maskSecondaryFn) { return }
+        if let held = releaseRequiredFor {
+            if flags.contains(held.flag) { return }
             releaseRequiredFor = nil
         }
-        let down = flags.contains(.maskControl)
-        let other: CGEventFlags = [.maskCommand, .maskAlternate, .maskShift, .maskSecondaryFn]
+        let down = flags.contains(key.flag)
+        let other = key.otherModifiers
         if down && !state.isDown {
             state.press(behavior: behavior(), busy: isBusy())
             controlPressedAt = clock()
@@ -204,18 +235,18 @@ final class FnShortcut {
 
     func handle(type: CGEventType, event: CGEvent) -> Bool {
         guard enabled() else { return false }
-        if let key = releaseRequiredFor {
-            if event.flags.contains(key == .control ? .maskControl : .maskSecondaryFn) { return false }
+        if let held = releaseRequiredFor {
+            if event.flags.contains(held.flag) { return false }
             releaseRequiredFor = nil
         }
-        if trigger() == .control {
+        if trigger().isModifierHold {
             if type == .flagsChanged {
                 sampleControl(flags: event.flags,
                               keyDownCount: CGEventSource.counterForEventType(.combinedSessionState, eventType: .keyDown))
             } else if type == .keyDown && state.isDown {
                 if let action = state.otherKey() { onAction?(action) }
             }
-            return false // All normal Control shortcuts continue to the foreground app.
+            return false // All normal modifier shortcuts continue to the foreground app.
         }
         let key = event.getIntegerValueField(.keyboardEventKeycode)
         let otherModifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]

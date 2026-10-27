@@ -36,6 +36,9 @@ struct MainView: View {
         .sheet(isPresented: $model.showSettings) {
             SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck)
         }
+        .sheet(isPresented: $model.showOnboarding) {
+            OnboardingView(model: model, preferences: model.preferences, speech: model.speech)
+        }
         .alert("Murmur needs your attention", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
             Button("Open Settings") { model.errorMessage = nil; model.showSettings = true }

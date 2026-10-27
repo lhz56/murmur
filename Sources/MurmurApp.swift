@@ -63,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var subscriptions = Set<AnyCancellable>()
     let model = AppModel(preview: CommandLine.arguments.contains("--preview"))
     private var launchedAtLogin = false
+    private var ducking: AudioDucking?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         launchedAtLogin = LaunchAtLogin.launchedAsLoginItem
@@ -80,9 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.showRecorder()
         }
         model.hideHUD = { [weak self] in self?.panel.orderOut(nil) }
+        if !model.isPreview { ducking = AudioDucking() }
         model.onRecordingChanged = { [weak self] recording in
-            self?.shortcut.setRecording(recording)
-            self?.updateStatusItem(recording: recording)
+            guard let self else { return }
+            if recording, model.preferences.duckAudio { ducking?.duck() } else if !recording { ducking?.restore() }
+            self.shortcut.setRecording(recording)
+            self.updateStatusItem(recording: recording)
         }
         shortcut.onToggle = { [weak self] in self?.model.toggleRecording() }
         shortcut.onEscape = { [weak self] in self?.model.cancelRecording() }
@@ -128,7 +132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             model.errorMessage = "Control Option Space is already used by another app. Close that app to use Murmur’s global shortcut. Recording from Murmur still works."
         }
         // At login, start quietly in the menu bar; the shortcut is what matters.
-        if !launchedAtLogin { openLibrary() }
+        if !model.isPreview && !model.preferences.onboarded && !CommandLine.arguments.contains("--smoke-test") {
+            model.showOnboarding = true
+        }
+        if !launchedAtLogin || model.showOnboarding { openLibrary() }
         if model.isPreview && CommandLine.arguments.contains("--island-preview") { previewIsland() }
         if CommandLine.arguments.contains("--smoke-test") {
             print("MURMUR_SMOKE_OK: window=\(window.frame.width)x\(window.frame.height), history=\(model.transcripts.count), root=\(model.storage.root.path)")
@@ -244,6 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let appItem = NSMenuItem(); main.addItem(appItem)
         let app = NSMenu(); appItem.submenu = app
         let about = NSMenuItem(title: "About Murmur", action: #selector(showAbout), keyEquivalent: ""); about.target = self; app.addItem(about)
+        let welcome = NSMenuItem(title: "Welcome Guide…", action: #selector(showWelcome), keyEquivalent: ""); welcome.target = self; app.addItem(welcome)
         app.addItem(.separator())
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","); settings.target = self; app.addItem(settings)
         app.addItem(.separator())
@@ -284,12 +292,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func pasteLastTranscript() { model.pasteLastTranscript() }
     @objc private func importAudio() { openLibrary(); model.importAudio() }
     @objc private func focusSearch() { openLibrary(); NotificationCenter.default.post(name: .murmurSearch, object: nil) }
+    @objc private func showWelcome() { openLibrary(); model.showSettings = false; model.showOnboarding = true }
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Murmur", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0", .credits: NSAttributedString(string: "A little less typing. A lot more you.\nNative dictation. On-device speech. Your own library.")])
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { openLibrary(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        ducking?.restoreNow()
         if model.speech.phase.isBusy || model.activeID != nil {
             Task { await model.prepareToQuit(); shortcut.unregister(); fnShortcut.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
             return .terminateLater
