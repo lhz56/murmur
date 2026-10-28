@@ -106,7 +106,32 @@ struct PasteboardSnapshot {
         return Destination(application: app, focus: focus, permissionGranted: trusted)
     }
 
+    /// Where the last confirmed insertion landed, so later edits to it can be read.
+    struct InsertedText {
+        let element: AXUIElement
+        let prefix: String
+        let suffix: String
+        let text: String
+        init?(element: AXUIElement, before: String?, selection: NSRange?, text: String) {
+            let value = (before ?? "") as NSString
+            guard let selection, before != nil, value.length <= 20_000, NSMaxRange(selection) <= value.length else { return nil }
+            self.element = element; self.text = text
+            prefix = value.substring(to: selection.location)
+            suffix = value.substring(from: NSMaxRange(selection))
+        }
+        /// The inserted region as it reads now, or nil once the field no longer
+        /// holds it (the message was sent, or the surrounding text changed).
+        func current(in value: String) -> String? {
+            guard value.count >= prefix.count + suffix.count, value.hasPrefix(prefix), value.hasSuffix(suffix) else { return nil }
+            return String(value.dropFirst(prefix.count).dropLast(suffix.count))
+        }
+    }
+    private(set) var lastInsertion: InsertedText?
+
+    func value(of element: AXUIElement) -> String? { stringAttribute(element, kAXValueAttribute) }
+
     func insert(_ text: String, into destination: Destination?) async -> InsertionResult {
+        lastInsertion = nil
         let pid = destination?.application.processIdentifier ?? 0
         guard AXIsProcessTrusted() else { return outcome(.permissionRequired, pid: pid, stage: "currentPermission") }
         guard let destination else { return outcome(.noTextField, pid: pid, stage: "missingDestination") }
@@ -175,6 +200,7 @@ struct PasteboardSnapshot {
             if let receiver,
                TextInsertion.insertionConfirmed(before: before, after: stringAttribute(receiver, kAXValueAttribute),
                                                  selection: selection, finalSelection: selectedRange(receiver), text: text) {
+                lastInsertion = InsertedText(element: receiver, before: before, selection: selection, text: text)
                 return outcome(.inserted(destination.application.localizedName ?? "your app"),
                                pid: pid, stage: "receiverConfirmed", dispatched: true)
             }

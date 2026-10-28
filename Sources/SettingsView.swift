@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Contacts
 
 /// System Settings–style preferences: a category sidebar and native grouped forms.
 struct SettingsView: View {
@@ -365,7 +366,22 @@ struct SettingsView: View {
         Section {
             Toggle(isOn: $preferences.contextWords) {
                 Text("Learn words from your screen")
-                Text("While you dictate, Murmur listens for names and unusual words shown in the app you’re using, and words you’ve corrected before. It stays on this Mac and nothing is saved.")
+                Text("While you dictate, Murmur listens for names and unusual words shown in the app you’re using and in the project you’re working on, and words you’ve corrected before. It stays on this Mac and nothing is saved.")
+            }
+            Toggle(isOn: $preferences.learnFromEdits) {
+                Text("Learn from your fixes")
+                Text("If you fix a misheard word right after Murmur types it, the fix is added below.")
+            }
+            Toggle(isOn: Binding(get: { preferences.contactNames }, set: { enabled in
+                guard enabled else { preferences.contactNames = false; return }
+                Task {
+                    let granted = (try? await CNContactStore().requestAccess(for: .contacts)) ?? false
+                    preferences.contactNames = granted
+                    if !granted { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts")!) }
+                }
+            })) {
+                Text("Names from Contacts")
+                Text("Spell your contacts’ names right. Names stay on this Mac.")
             }
         }
         Section {

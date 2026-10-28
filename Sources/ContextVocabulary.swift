@@ -2,24 +2,124 @@ import AppKit
 import ApplicationServices
 import NaturalLanguage
 import Carbon
+import Contacts
+import os
 
 /// Words worth listening for in this recording: names, products and jargon
 /// visible in the app you're dictating into, plus words you've corrected in
 /// past transcripts. Nothing is stored or sent anywhere; the terms only bias
 /// the on-device recognizer for one recording.
 enum ContextVocabulary {
-    static let maxTerms = 60
+    static let maxTerms = 80
 
-    /// Reads on-screen text, picks candidate terms, and filters out ordinary
-    /// dictionary words. Bounded to a few hundred milliseconds.
-    static func gather(pid: pid_t?, edits: [(original: String, corrected: String)]) async -> [String] {
-        let found = await Task.detached(priority: .userInitiated) { () -> (names: [String], words: [String: Int], learned: [String]) in
+    /// Reads on-screen text, the project you're working in, and (if allowed)
+    /// contact names, then filters out ordinary dictionary words. Bounded to
+    /// a few hundred milliseconds; project and contact lists are cached.
+    static func gather(pid: pid_t?, edits: [(original: String, corrected: String)], contacts: Bool = false) async -> [String] {
+        let found = await Task.detached(priority: .userInitiated) { () -> (names: [String], words: [String: Int], learned: [String], extra: [String]) in
             let text = pid.map { screenText(pid: $0) } ?? ""
             let (names, words) = candidates(in: text)
-            return (names, words, learnedWords(from: edits))
+            let project = pid.flatMap(projectRoot).map(projectWords) ?? []
+            return (names, words, learnedWords(from: edits), project + (contacts ? contactNames() : []))
         }.value
         return await MainActor.run {
-            rank(names: found.names, words: found.words, learned: found.learned, isUnknown: isUnknownWord)
+            rank(names: found.names, words: found.words, learned: found.learned, extra: found.extra, isUnknown: isUnknownWord)
+        }
+    }
+
+    // MARK: Project words
+
+    private static let cache = OSAllocatedUnfairLock(initialState: [String: (date: Date, terms: [String])]())
+
+    private static func cached(_ key: String, maxAge: TimeInterval, make: () -> [String]) -> [String] {
+        if let hit = cache.withLock({ $0[key] }), Date().timeIntervalSince(hit.date) < maxAge { return hit.terms }
+        let terms = make()
+        cache.withLock { $0[key] = (Date(), terms) }
+        return terms
+    }
+
+    /// The git project behind the focused window: from the window's document
+    /// (editors, Terminal's working directory) or a folder named in its title.
+    nonisolated static func projectRoot(pid: pid_t) -> URL? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        guard let window = element(app, kAXFocusedWindowAttribute) else { return nil }
+        let fileManager = FileManager.default
+        func gitRoot(from start: URL) -> URL? {
+            var url = start
+            for _ in 0..<8 {
+                if fileManager.fileExists(atPath: url.appendingPathComponent(".git").path) { return url }
+                let parent = url.deletingLastPathComponent()
+                if parent.path == url.path || parent.path == "/" { return nil }
+                url = parent
+            }
+            return nil
+        }
+        if let document = string(window, kAXDocumentAttribute), let url = URL(string: document), url.isFileURL,
+           let root = gitRoot(from: url) { return root }
+        guard let title = string(window, kAXTitleAttribute) else { return nil }
+        let home = fileManager.homeDirectoryForCurrentUser
+        let parents = ["", "Developer", "Projects", "projects", "code", "Code", "src", "dev", "GitHub", "Documents/GitHub"]
+            .map { $0.isEmpty ? home : home.appendingPathComponent($0) }
+        for part in title.components(separatedBy: CharacterSet(charactersIn: "—–|")).map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if part.hasPrefix("~/") || part.hasPrefix("/") {
+                let url = URL(fileURLWithPath: (part as NSString).expandingTildeInPath)
+                if let root = gitRoot(from: url) { return root }
+            }
+            guard !part.isEmpty, part.count <= 60, !part.contains("/") else { continue }
+            for parent in parents where fileManager.fileExists(atPath: parent.appendingPathComponent(part).appendingPathComponent(".git").path) {
+                return parent.appendingPathComponent(part)
+            }
+        }
+        return nil
+    }
+
+    /// Names from the project's files and folders and its README: product
+    /// names, types, and modules ("FluidAudio", "ContextVocabulary").
+    nonisolated static func projectWords(_ root: URL) -> [String] {
+        cached("project:" + root.path, maxAge: 600) {
+            var counts: [String: Int] = [:]
+            func add(_ word: String) { if word.count >= 4, word.count <= 40, isProperShape(word) { counts[word, default: 0] += 1 } }
+            add(root.lastPathComponent.prefix(1).uppercased() + root.lastPathComponent.dropFirst())
+            let skip: Set<String> = ["node_modules", ".build", "build", "dist", "Pods", "vendor", "DerivedData", ".git", "target", "venv", ".venv"]
+            if let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                var seen = 0
+                for case let url as URL in walker {
+                    if skip.contains(url.lastPathComponent) { walker.skipDescendants(); continue }
+                    if walker.level > 3 { walker.skipDescendants() }
+                    seen += 1; if seen > 3000 { break }
+                    let name = url.deletingPathExtension().lastPathComponent
+                    for part in name.components(separatedBy: CharacterSet(charactersIn: "-_. ")) { add(part) }
+                }
+            }
+            for name in ["README.md", "README", "readme.md", "Readme.md"] {
+                if let text = try? String(contentsOf: root.appendingPathComponent(name), encoding: .utf8) {
+                    let (names, words) = candidates(in: String(text.prefix(8000)))
+                    names.forEach { counts[$0, default: 0] += 2 }
+                    words.forEach { counts[$0.key, default: 0] += $0.value }
+                    break
+                }
+            }
+            return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.prefix(150).map(\.key)
+        }
+    }
+
+    // MARK: Contacts
+
+    /// Full names and companies from Contacts, only once access is granted.
+    nonisolated static func contactNames() -> [String] {
+        guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else { return [] }
+        return cached("contacts", maxAge: 3600) {
+            var names: [String] = []
+            let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactNicknameKey, CNContactOrganizationNameKey] as [CNKeyDescriptor]
+            try? CNContactStore().enumerateContacts(with: CNContactFetchRequest(keysToFetch: keys)) { contact, stop in
+                let full = [contact.givenName, contact.familyName].filter { !$0.isEmpty }.joined(separator: " ")
+                for name in [full, contact.nickname, contact.organizationName] where name.count >= 3 && name.count <= 40 {
+                    names.append(name)
+                }
+                if names.count > 2000 { stop.pointee = true }
+            }
+            return names
         }
     }
 
@@ -125,7 +225,7 @@ enum ContextVocabulary {
 
     /// Names always qualify. Other shaped words qualify only when the system
     /// dictionary doesn't know them, which drops UI labels like "Settings".
-    static func rank(names: [String], words: [String: Int], learned: [String],
+    static func rank(names: [String], words: [String: Int], learned: [String], extra: [String] = [],
                      isUnknown: (String) -> Bool, limit: Int = maxTerms) -> [String] {
         var seen = Set<String>(), result: [String] = []
         func add(_ term: String) {
@@ -136,6 +236,10 @@ enum ContextVocabulary {
         names.forEach(add)
         let ordered = words.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         for (word, _) in ordered where !seen.contains(word.lowercased()) && isUnknown(word) { add(word) }
+        // Project and contact names count when any part is unusual ("Nkechi Okafor", not "John Smith").
+        for term in extra where !seen.contains(term.lowercased()) && term.split(separator: " ").contains(where: { isUnknown(String($0)) }) {
+            add(term)
+        }
         return result
     }
 
@@ -144,5 +248,69 @@ enum ContextVocabulary {
         if checker.checkSpelling(of: word, startingAt: 0).location != NSNotFound { return true }
         // "macOS" or "GPT4" can pass a spell check yet still need help.
         return word.dropFirst().contains(where: \.isUppercase) || word.contains(where: \.isNumber)
+    }
+}
+
+/// Learns corrections from edits you make right after Murmur types: if
+/// "recaller" was inserted and you fix it to "Recallr", that pair is kept.
+/// Heavy rewrites are ignored; only small, similar-looking word swaps count.
+enum CorrectionLearner {
+    static func pairs(original: String, edited: String) -> [(heard: String, desired: String)] {
+        let a = words(original), b = words(edited)
+        guard !a.isEmpty, !b.isEmpty, a != b else { return [] }
+        // Longest common subsequence over words, then walk the gaps.
+        var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        // Mostly rewritten text is an edit of meaning, not a recognition fix.
+        guard table[0][0] * 10 >= a.count * 6 else { return [] }
+        var result: [(String, String)] = []
+        var i = 0, j = 0
+        while i < a.count || j < b.count {
+            if i < a.count, j < b.count, a[i] == b[j] { i += 1; j += 1; continue }
+            let startI = i, startJ = j
+            while i < a.count || j < b.count {
+                if i < a.count, j < b.count, a[i] == b[j] { break }
+                if j < b.count, i == a.count || table[i][j + 1] >= table[i + 1][j] { j += 1 } else { i += 1 }
+            }
+            let heard = a[startI..<i].joined(separator: " "), desired = b[startJ..<j].joined(separator: " ")
+            guard (1...3).contains(i - startI), (1...3).contains(j - startJ) else { continue }
+            if accept(heard: heard, desired: desired, atStart: startJ == 0) { result.append((heard, desired)) }
+        }
+        return result.count <= 3 ? result : []
+    }
+
+    private static func accept(heard: String, desired: String, atStart: Bool) -> Bool {
+        let h = heard.lowercased().filter(\.isLetter), d = desired.lowercased().filter(\.isLetter)
+        guard h.count >= 3, d.count >= 3 else { return false }
+        if h == d {
+            // Capitalization alone counts only for names mid-sentence ("recallr" → "Recallr").
+            return !atStart && heard != desired && desired.contains(where: \.isUppercase)
+        }
+        let score = similarity(h, d)
+        // Short mishearings keep their first sound: "Zha" → "Zaw", but not "Tuesday" → "Friday".
+        return score >= 0.5 || (h.first == d.first && score >= 0.3)
+    }
+
+    private static func words(_ text: String) -> [String] {
+        text.split(whereSeparator: \.isWhitespace).map { $0.trimmingCharacters(in: .punctuationCharacters) }.filter { !$0.isEmpty }
+    }
+
+    /// 1 − normalized edit distance.
+    static func similarity(_ a: String, _ b: String) -> Double {
+        let x = Array(a), y = Array(b)
+        guard !x.isEmpty, !y.isEmpty else { return 0 }
+        var previous = Array(0...y.count)
+        for i in 1...x.count {
+            var current = [i] + Array(repeating: 0, count: y.count)
+            for j in 1...y.count {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            previous = current
+        }
+        return 1 - Double(previous[y.count]) / Double(max(x.count, y.count))
     }
 }

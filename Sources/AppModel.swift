@@ -23,6 +23,8 @@ final class Preferences: ObservableObject {
     @Published var selfCorrections: Bool { didSet { defaults.set(selfCorrections, forKey: "selfCorrections") } }
     @Published var smartFormatting: Bool { didSet { defaults.set(smartFormatting, forKey: "smartFormatting") } }
     @Published var appStyle: Bool { didSet { defaults.set(appStyle, forKey: "appStyle") } }
+    @Published var learnFromEdits: Bool { didSet { defaults.set(learnFromEdits, forKey: "learnFromEdits") } }
+    @Published var contactNames: Bool { didSet { defaults.set(contactNames, forKey: "contactNames") } }
     @Published var snippets: [TextPolish.Snippet] { didSet { defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets") } }
     @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: "onboarded") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
@@ -45,6 +47,8 @@ final class Preferences: ObservableObject {
         selfCorrections = defaults.object(forKey: "selfCorrections") as? Bool ?? true
         smartFormatting = defaults.object(forKey: "smartFormatting") as? Bool ?? true
         appStyle = defaults.object(forKey: "appStyle") as? Bool ?? true
+        learnFromEdits = defaults.object(forKey: "learnFromEdits") as? Bool ?? true
+        contactNames = defaults.bool(forKey: "contactNames")
         snippets = defaults.data(forKey: "snippets").flatMap { try? JSONDecoder().decode([TextPolish.Snippet].self, from: $0) } ?? []
         onboarded = defaults.bool(forKey: "onboarded")
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
@@ -84,6 +88,7 @@ final class AppModel: ObservableObject {
     /// Text selected when an edit-by-voice recording started.
     private var editSelection: String?
     private var contextTask: Task<Void, Never>?
+    private var fixWatch: Task<Void, Never>?
     @Published var errorMessage: String?
     @Published var toast: String?
     @Published var playingID: UUID?
@@ -420,10 +425,11 @@ final class AppModel: ObservableObject {
         speech.updateContext([])
         guard preferences.contextWords else { contextTask = nil; return }
         let pid = pasteTarget?.application.processIdentifier
+        let contacts = preferences.contactNames
         let edits = transcripts.lazy.filter { $0.deletedAt == nil && !$0.originalText.isEmpty && $0.text != $0.originalText }
             .prefix(200).map { (original: $0.originalText, corrected: $0.text) }
         contextTask = Task { [weak self] in
-            let terms = await ContextVocabulary.gather(pid: pid, edits: Array(edits))
+            let terms = await ContextVocabulary.gather(pid: pid, edits: Array(edits), contacts: contacts)
             guard !Task.isCancelled, let self else { return }
             speech.updateContext(terms)
             timingLog.info("Context terms: \(terms.count, privacy: .public)")
@@ -613,6 +619,7 @@ final class AppModel: ObservableObject {
             deliveryResult = result
             // Unconfirmed pastes keep the transcript on the clipboard as a fallback.
             if case .inserted = result, let borrowed, pasteboard.changeCount == written { borrowed.restore(to: pasteboard) }
+            if case .inserted = result, preferences.learnFromEdits, let insertion = textInsertion.lastInsertion { watchForFixes(insertion) }
             notify(result.message)
         } else { notify(preferences.autoCopy ? "Saved & copied to clipboard" : "Saved to your library") }
     }
@@ -675,7 +682,28 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func rememberCorrection(heard: String, desired: String) {
+    /// After Murmur types, watch that spot briefly. If you fix a misheard word
+    /// before sending or moving on, the fix is learned as a correction.
+    private func watchForFixes(_ insertion: TextInsertion.InsertedText) {
+        fixWatch?.cancel()
+        fixWatch = Task { [weak self] in
+            var latest = insertion.text
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self else { return }
+                guard let value = textInsertion.value(of: insertion.element), let region = insertion.current(in: value) else { break }
+                latest = region
+            }
+            guard !Task.isCancelled, let self else { return }
+            let pairs = CorrectionLearner.pairs(original: insertion.text, edited: latest)
+            for pair in pairs { rememberCorrection(heard: pair.heard, desired: pair.desired, announce: false) }
+            if let first = pairs.first { notify("Learned “\(first.desired)”") }
+        }
+    }
+
+    func rememberCorrection(heard: String, desired: String) { rememberCorrection(heard: heard, desired: desired, announce: true) }
+
+    private func rememberCorrection(heard: String, desired: String, announce: Bool) {
         let from = heard.trimmingCharacters(in: .whitespacesAndNewlines)
         let to = desired.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !from.isEmpty, !to.isEmpty, from != to, !from.contains("=>"), !to.contains("=>"),
@@ -684,7 +712,7 @@ final class AppModel: ObservableObject {
         if !preferences.vocabulary.components(separatedBy: .newlines).contains(pair) {
             preferences.vocabulary += (preferences.vocabulary.isEmpty ? "" : "\n") + pair
         }
-        notify("Correction remembered")
+        if announce { notify("Correction remembered") }
     }
 
     func togglePlayback(_ entry: Transcript) {

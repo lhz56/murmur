@@ -15,6 +15,10 @@ A native Mac dictation app with local transcription, a searchable recording libr
 - Optional filler-word cleanup (um, uh, erm) for English, and automatic spacing when you dictate right after existing text.
 - Open at login: Murmur starts quietly in the menu bar.
 - Voice commands: say "new line" or "new paragraph" (English).
+- Fix changes of mind: "scratch that" drops the last sentence; "no wait" / "I mean" are resolved by Apple's on-device model when Apple Intelligence is on.
+- Smart formatting (spoken emails and domains, numbered lists), per-app style (no closing period in chats and terminals), and voice snippets ("insert my email").
+- Edit selection by voice (Control-Option-E) and Ask your notes, using Apple's on-device model.
+- Learns from your fixes: correct a misheard word right after Murmur types it and the fix is remembered. Optional names from Contacts and words from the project you're working in.
 - Lowers other audio while you record, then fades it back.
 - Dictation key: Control, Right Option, Right Command, or Fn.
 - A first-run welcome guide for permissions and a live try-it step (Murmur menu → Welcome Guide).

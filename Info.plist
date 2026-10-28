@@ -12,5 +12,6 @@
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Murmur listens while you record to turn your voice into text, privately on your Mac.</string>
+<key>NSContactsUsageDescription</key><string>Murmur listens for the names in your contacts so they’re spelled right when you dictate. Names never leave your Mac.</string>
 <key>NSSpeechRecognitionUsageDescription</key><string>Murmur transcribes your recordings on your Mac so you can type with your voice.</string>
 </dict></plist>
