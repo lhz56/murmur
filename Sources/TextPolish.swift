@@ -74,6 +74,22 @@ enum TextPolish {
         return !["sure", "here", "certainly", "i can", "i'm sorry", "as an"].contains(where: lower.hasPrefix)
     }
 
+    /// A restyle may change wording and length a little, never wholesale.
+    static func acceptsRestyle(_ output: String, for input: String) -> Bool {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count * 2 >= input.count, trimmed.count <= input.count * 2 + 20 else { return false }
+        let lower = trimmed.lowercased()
+        return !["sure", "here", "certainly", "i can", "i'm sorry", "as an", "restyled"].contains(where: lower.hasPrefix)
+    }
+
+    /// A user's writing style for one app, applied by the on-device model.
+    struct StyleRule: Codable, Equatable, Identifiable {
+        var id = UUID()
+        var bundleID: String
+        var appName: String
+        var instruction: String
+    }
+
     // MARK: Formatting
 
     private static let tlds = "com|org|net|io|ai|co|dev|app|edu|gov|me|us|uk|ca|xyz|so|gg|fm|tv|info|biz"

@@ -6,7 +6,7 @@ import Contacts
 struct SettingsView: View {
     enum Pane: String, CaseIterable, Identifiable {
         case shortcut = "Shortcut", microphone = "Microphone", transcription = "Transcription"
-        case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary", snippets = "Snippets"
+        case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary", snippets = "Snippets", styles = "Styles"
         var id: Self { self }
         var symbol: String {
             switch self {
@@ -17,6 +17,7 @@ struct SettingsView: View {
             case .recordings: return "externaldrive"
             case .vocabulary: return "character.book.closed"
             case .snippets: return "text.badge.plus"
+            case .styles: return "paintbrush"
             }
         }
     }
@@ -91,6 +92,7 @@ struct SettingsView: View {
         case .recordings: recordingsPane
         case .vocabulary: vocabularyPane
         case .snippets: snippetsPane
+        case .styles: stylesPane
         }
     }
 
@@ -374,6 +376,61 @@ struct SettingsView: View {
         Task.detached(priority: .utility) {
             let bytes = AppModel.audioBytes(in: directory)
             await MainActor.run { audioUsage = bytes }
+        }
+    }
+
+    @State private var styleApp = ""
+    @State private var styleInstruction = ""
+
+    /// Apps open right now, as candidates for a style.
+    private var styleCandidates: [(id: String, name: String)] {
+        var seen = Set(preferences.styleRules.map(\.bundleID))
+        return NSWorkspace.shared.runningApplications.compactMap { app in
+            guard app.activationPolicy == .regular, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier,
+                  seen.insert(id).inserted else { return nil }
+            return (id, app.localizedName ?? id)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    @ViewBuilder private var stylesPane: some View {
+        if let reason = LocalModel.unavailableReason {
+            Section { Label(reason, systemImage: "sparkles").foregroundStyle(Palette.muted) }
+        }
+        Section {
+            Picker("App", selection: $styleApp) {
+                Text("Choose an open app").tag("")
+                ForEach(styleCandidates, id: \.id) { app in Text(app.name).tag(app.id) }
+            }
+            TextField("Style", text: $styleInstruction, prompt: Text("Professional and concise"), axis: .vertical).lineLimit(1...3)
+            HStack(spacing: 6) {
+                ForEach(["Professional and concise", "Casual, all lowercase", "Short bullet points", "Friendly, no exclamation marks"], id: \.self) { preset in
+                    Button(preset) { styleInstruction = preset }.buttonStyle(QuietButtonStyle()).lineLimit(1)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Add style") {
+                    let name = styleCandidates.first { $0.id == styleApp }?.name ?? styleApp
+                    preferences.styleRules.append(TextPolish.StyleRule(bundleID: styleApp, appName: name,
+                                                                        instruction: styleInstruction.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    styleApp = ""; styleInstruction = ""
+                }.disabled(styleApp.isEmpty || styleInstruction.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        } header: { Text("New style") } footer: {
+            Text("When you dictate into this app, Apple Intelligence rewrites your words in this style, on your Mac. Apps without a style are never rewritten.")
+        }
+        if !preferences.styleRules.isEmpty {
+            Section("Your styles") {
+                ForEach(preferences.styleRules) { rule in
+                    LabeledContent {
+                        Button { preferences.styleRules.removeAll { $0.id == rule.id } } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless).help("Remove style")
+                    } label: {
+                        Text(rule.appName)
+                        Text(rule.instruction).lineLimit(2)
+                    }
+                }
+            }
         }
     }
 

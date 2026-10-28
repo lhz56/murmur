@@ -28,6 +28,7 @@ final class Preferences: ObservableObject {
     @Published var learnFromEdits: Bool { didSet { defaults.set(learnFromEdits, forKey: "learnFromEdits") } }
     @Published var contactNames: Bool { didSet { defaults.set(contactNames, forKey: "contactNames") } }
     @Published var snippets: [TextPolish.Snippet] { didSet { defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets") } }
+    @Published var styleRules: [TextPolish.StyleRule] { didSet { defaults.set(try? JSONEncoder().encode(styleRules), forKey: "styleRules") } }
     @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: "onboarded") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
@@ -55,6 +56,7 @@ final class Preferences: ObservableObject {
         learnFromEdits = defaults.object(forKey: "learnFromEdits") as? Bool ?? true
         contactNames = defaults.bool(forKey: "contactNames")
         snippets = defaults.data(forKey: "snippets").flatMap { try? JSONDecoder().decode([TextPolish.Snippet].self, from: $0) } ?? []
+        styleRules = defaults.data(forKey: "styleRules").flatMap { try? JSONDecoder().decode([TextPolish.StyleRule].self, from: $0) } ?? []
         onboarded = defaults.bool(forKey: "onboarded")
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
@@ -411,7 +413,7 @@ final class AppModel: ObservableObject {
     /// lists, per-app style, and snippets. Only a heard correction phrase
     /// reaches the on-device model.
     func polish(_ original: String, bundleID: String?, vocabulary: String? = nil,
-                removeFillers: Bool? = nil, voiceCommands: Bool? = nil) async -> (text: String, steps: [String]) {
+                removeFillers: Bool? = nil, voiceCommands: Bool? = nil, applyStyles: Bool = true) async -> (text: String, steps: [String]) {
         let vocabulary = vocabulary ?? preferences.vocabulary
         let fillers = removeFillers ?? preferences.cleansFillers, commands = voiceCommands ?? preferences.usesVoiceCommands
         var steps: [String] = []
@@ -437,6 +439,10 @@ final class AppModel: ObservableObject {
                 stage("Formatted a numbered list", TextPolish.formattingLists)
             }
             if preferences.appStyle { stage("Matched the app’s style") { TextPolish.styled($0, for: .init(bundleID: bundleID)) } }
+        }
+        if applyStyles, let bundleID, let rule = preferences.styleRules.first(where: { $0.bundleID == bundleID }),
+           let restyled = await LocalModel.restyle(text, instruction: rule.instruction), restyled != text {
+            steps.append("Apple Intelligence applied your \(rule.appName) style"); text = restyled
         }
         stage("Expanded a snippet") { TextPolish.expandingSnippets($0, snippets: self.preferences.snippets) }
         return (text, steps)
@@ -476,7 +482,7 @@ final class AppModel: ObservableObject {
             guard activeID == id, !Task.isCancelled else { return }
             let transcribeSeconds = stopRequestedAt.map { ProcessInfo.processInfo.systemUptime - $0 }
             let polishStart = ProcessInfo.processInfo.systemUptime
-            let polished = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
+            let polished = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier, applyStyles: editSelection == nil)
             var text = polished.text
             var details = DictationDetails(contextWords: speech.contextTerms, boostedWords: speech.boostedWords, steps: polished.steps,
                                            transcribeSeconds: transcribeSeconds)

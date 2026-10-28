@@ -14,6 +14,10 @@ import Foundation
         assert(!P.acceptsCorrection("Sure! Here is the text: Meet Wednesday.", for: "Meet Tuesday, no wait, Wednesday."))
         assert(!P.acceptsCorrection("", for: "Meet Tuesday."))
 
+        assert(P.acceptsRestyle("Hi Sam, thanks for the update.", for: "hey sam thanks for the update"))
+        assert(!P.acceptsRestyle("Sure! Here's a professional version.", for: "hey sam thanks"))
+        assert(!P.acceptsRestyle("Ok", for: "hey sam thanks for the update on the launch"))
+
         // Addresses and lists
         assert(P.formattingAddresses("Email lin at gmail dot com today") == "Email lin@gmail.com today", P.formattingAddresses("Email lin at gmail dot com today"))
         assert(P.formattingAddresses("Check out recallr dot ai.") == "Check out recallr.ai.")
