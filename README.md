@@ -1,138 +1,98 @@
-# Murmur
+<p align="center">
+  <img src="docs/icon.png" width="128" height="128" alt="Murmur icon">
+</p>
 
-[![Tests](https://github.com/lhz56/murmur/actions/workflows/tests.yml/badge.svg)](https://github.com/lhz56/murmur/actions/workflows/tests.yml)
+<h1 align="center">Murmur</h1>
 
-A native Mac dictation app with local transcription, a searchable recording library, and automatic insertion into the text box you are using. No subscription, account, API key, analytics, or cloud transcription.
+<p align="center">
+  <b>Talk, and it types.</b> Private, on-device dictation for the Mac.<br>
+  Free and open source. No account, no subscription, no cloud.
+</p>
 
-## Quick start
+<p align="center">
+  <a href="https://github.com/lhz56/murmur/actions/workflows/tests.yml"><img src="https://github.com/lhz56/murmur/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/macOS-26%2B-black.svg" alt="macOS 26+">
+  <img src="https://img.shields.io/badge/Apple%20silicon-required-black.svg" alt="Apple silicon">
+</p>
+
+---
+
+Hold **Control** in any app, say what you mean, and let go. Murmur turns your voice into clean text where you were typing, a fraction of a second after you let go, without anything leaving your Mac.
+
+It runs NVIDIA's Parakeet speech model on the Neural Engine, so it's fast and stays cool on a fanless or quiet Mac. It learns the names and words you use, from your screen, your project, and your own corrections, and it keeps a searchable library of everything you've said.
+
+## Install
+
+You need an **Apple silicon Mac on macOS 26** and Apple's Command Line Tools (`xcode-select --install`).
 
 ```sh
 git clone https://github.com/lhz56/murmur.git && cd murmur && ./install.sh
 ```
 
-`install.sh` checks your Mac, builds the Parakeet speech helper the first time, builds and signs Murmur, installs it in Applications, and opens it. Run it again after `git pull` to update.
-
-## Features
-
-- Hold **Control** to talk; release to stop. Release during startup cancels immediately, and short taps are ignored in hold mode.
-- A floating recording pill with a waveform that follows your voice, live words, and start/stop chimes.
-- Automatic insertion into the original focused text box. With clipboard copying off, Murmur restores your previous clipboard after a confirmed insertion.
-- **Control + Option + V** pastes your last transcript into any text box; the menu bar can also copy it.
-- Saved transcripts and audio, search, favorites, editing, export, trash, and interrupted-recording recovery, with keyboard navigation and context menus.
-- Light and dark appearance that follows macOS.
-- Local Parakeet, Apple, and Whisper speech engines, with vocabulary corrections.
-- Context-aware words: names and unusual words on screen in the app you're dictating into, plus words you've corrected before, bias recognition for that recording. Parakeet uses FluidAudio's CTC word spotter (a 110M-parameter model on the Neural Engine, downloaded once) and only swaps a word when the audio supports it. Nothing is stored or uploaded.
-- Optional filler-word cleanup (um, uh, erm) for English, and automatic spacing when you dictate right after existing text.
-- Open at login: Murmur starts quietly in the menu bar.
-- Voice commands: say "new line" or "new paragraph" (English).
-- Fix changes of mind: "scratch that" drops the last sentence; "no wait" / "I mean" are resolved by Apple's on-device model when Apple Intelligence is on.
-- Smart formatting (spoken emails and domains, numbered lists), per-app style (no closing period in chats and terminals), and voice snippets ("insert my email").
-- Edit selection by voice (Control-Option-E) and Ask your notes, using Apple's on-device model.
-- Learns from your fixes: correct a misheard word right after Murmur types it and the fix is remembered. Optional names from Contacts and words from the project you're working in.
-- Lowers other audio while you record, then fades it back.
-- Dictation key: Control, Right Option, Right Command, or Fn.
-- A first-run welcome guide for permissions and a live try-it step (Murmur menu → Welcome Guide).
-- Per-app writing styles ("In Mail, professional and concise"), applied by Apple's on-device model only in apps you choose.
-- "What Murmur did" on every transcript: words listened for, words recognized, cleanup steps, timings, and how the text was inserted.
-- Type Last Transcript (Control-Option-T) for apps that block pasting, and automatic typing when a paste can't be sent.
-- Hold a middle or side mouse button to dictate.
-- Insights: words dictated, speaking pace, and time saved versus typing.
-- Optional audio retention (7, 30, or 90 days; text is kept) and storage controls.
-- Optional, off-by-default update check against GitHub Releases.
-- Microphone selection and input testing, shortcut testing, and a no-audio insertion check.
-
-## Requirements
-
-- An **Apple silicon Mac running macOS 26 or later**.
-- Apple Command Line Tools with the macOS 26 SDK and Swift 6 for building.
-- Git and CMake to build the optional local speech helpers.
-- Internet access for initial dependency and model downloads. Recording and transcription run locally afterward.
-
-## Build
-
-Clone this repository, then run:
-
-```sh
-git clone https://github.com/lhz56/murmur.git
-cd murmur
-
-# Build the Parakeet helper (recommended). Omit --parakeet-only to also
-# build Whisper and download its ~550 MB model.
-./Tools/BuildLocalSpeech.sh --parakeet-only
-
-# Compile and sign the native app. Quit an existing Murmur process first.
-./build.sh
-open Murmur.app
-```
-
-There is no Xcode project. The app compiles directly from `Sources/` using SwiftUI, AppKit, AVAudioEngine, and Apple's SpeechAnalyzer / SpeechTranscriber APIs. `LocalSpeech/Package.resolved` pins the Parakeet helper's Swift dependencies. Model files, speech helper binaries, app bundles, and build caches are excluded from Git.
-
-Parakeet is the recommended engine: it runs on the Neural Engine rather than the GPU, transcribes a typical dictation in about 0.1 seconds, and keeps a fanless or quiet Mac cool. Whisper runs on the GPU and is slower and warmer. If the selected engine's helper or model is missing, Murmur finishes with Apple's on-device result instead of failing.
-
-While idle, Murmur receives Control presses as events once Accessibility is allowed, rather than polling the keyboard. It falls back to polling only without that permission or while Secure Keyboard Entry is on.
-
-For an Apple-only build, skip `Tools/BuildLocalSpeech.sh`, run `./build.sh`, and choose **Apple** in Settings. For Parakeet, use **Download model** in Settings once on a new Mac. Whisper uses the model downloaded by `Tools/BuildLocalSpeech.sh`.
-
-`Tools/SignApp.sh` creates or reuses a private local signing certificate in the login Keychain. macOS may ask you to approve codesign access when building. Reusing the same certificate gives future builds a consistent app identity. The private key stays on your Mac and is not part of this repository. This is local signing, not Developer ID distribution or notarization. `build.sh` builds and verifies a staged app before replacing an existing bundle and refuses to modify a running Murmur app.
-
-## Releases
-
-`Tools/Release.sh 1.1` sets the version, builds, and writes `dist/Murmur-1.1.zip`, then prints the `gh release create` command to publish it. Builds are locally signed, not notarized, so on another Mac the first launch needs right-click → **Open**. GitHub Actions runs `test.sh` on every push (`.github/workflows/tests.yml`).
+`install.sh` builds the speech helper the first time, builds and signs Murmur locally, installs it in Applications, and opens it. A welcome guide walks you through the Microphone and Accessibility permissions and a first dictation. Run `./install.sh` again after `git pull` to update.
 
 ## Use
 
-1. Open **Murmur.app** and allow microphone access when macOS asks.
-2. In Settings, select your microphone and speech engine. Allow the model to prepare; its first initialization can take longer than later launches.
-3. Enable Murmur in **System Settings → Privacy & Security → Accessibility** for automatic insertion and the Fn event tap.
-4. Click a text box, hold **Control**, and speak after the start chime. Release to stop capture. Keep the text box focused while transcription finishes.
-5. Murmur saves the recording and transcript, copies the finished text, and pastes it into the original text box. If focus changes or insertion cannot be confirmed, the text remains available in the library and clipboard.
+| Do this | Press |
+|---|---|
+| Dictate (hold, talk, release) | **Control** (or Right Option, Right Command, Fn, or a mouse button) |
+| Hands-free start / finish | **⌃ ⌥ Space** |
+| Cancel | **Esc** |
+| Paste your last transcript again | **⌃ ⌥ V** |
+| Type your last transcript (for apps that block paste) | **⌃ ⌥ T** |
+| Rewrite selected text by voice ("make this shorter") | **⌃ ⌥ E** |
 
-Choose **Press to toggle** in Settings for hands-free Control recording, or use **Control + Option + Space**. Settings also offers **Fn / Globe** shortcuts. Fn must send a standard Mac Fn event; keys handled entirely inside keyboard firmware cannot trigger Murmur. **Test key** checks the physical signal without recording.
+Short taps of Control are ignored, so your normal shortcuts keep working.
 
-In the library, use ↑/↓ to move between transcripts, ⌘C to copy the selected one, Delete to move it to Trash, and Esc to close it. Right-click a transcript for more actions.
+## What it does
 
-**Test microphone** displays the input level without saving audio. **Test insertion** gives you eight seconds to focus a text box, then inserts a test sentence without recording. Closing the library leaves Murmur in the menu bar; **Command + Q** quits.
+**Fast, accurate, local**
+- Parakeet TDT 0.6B on the Neural Engine, with Apple's on-device recognizer for live text while you speak. Whisper is optional.
+- Murmur's own idle CPU use is close to zero: it waits for key events instead of polling the keyboard.
 
-The floating pill does not take keyboard focus. Capture stops synchronously on key release; final transcription still takes processing time. Very short or uncertain results with weak audio are saved for review rather than automatically inserted. Vocabulary corrections apply explicitly configured replacements. Apple's on-device language model is used only for features you trigger or configure: "no wait" style corrections when such a phrase is heard, edit by voice, Ask, and per-app styles. Everything else is rule-based.
+**Understands your words**
+- **Context words:** names and unusual words on screen in the app you're dictating into, file and product names from the project you're working on, and optionally your Contacts. A small second model listens for them and swaps them in only when the audio supports it ("recaller" → **Recallr**).
+- **Learns from your fixes:** correct a misheard word right after Murmur types it, or in the library, and it's remembered.
+- **Vocabulary:** your own `heard => meant` corrections.
 
-The recording cue follows the first copied microphone buffer, without waiting for disk writes or meter updates. Murmur prepares a stopped microphone graph ahead of use and reuses it after recording; it captures no audio while idle. Input taps use the microphone's current hardware format. A small Objective-C bridge converts native tap exceptions into recoverable errors because Swift cannot catch those exceptions directly.
+**Writes clean text**
+- Removes "um" and "uh"; "scratch that" deletes the last sentence; "new line" and "new paragraph" work.
+- "lin at gmail dot com" → lin@gmail.com; "one… two… three…" → a numbered list.
+- Matches the app: no closing period in chats and terminals. Voice snippets: "insert my email."
 
-Escape cancels startup as well as active recording. Disabling or restarting the shortcut hook finishes an active hold and waits for the physical key to be released before accepting another hold. Saved-audio retries reserve the recording immediately, so repeated clicks cannot start overlapping jobs or replace another recording's text. Restore a recording from Trash before retrying it.
+**With Apple Intelligence** (optional, also on-device)
+- "Tuesday, no wait, Wednesday" → "Wednesday."
+- Edit selected text by voice, per-app writing styles ("In Mail, professional and concise"), and Ask questions about your notes.
 
-Quitting stops capture, flushes unfinished audio, and cancels recognition instead of waiting for a model to finish. Local worker requests can be cancelled independently; late results cannot update a newer recording. Recognition has bounded waits: 30 seconds for Apple recording finalization, 180 seconds for audio-file jobs, and 120 seconds for a Parakeet recognition request. A timeout preserves the recording for another attempt. Losing an optional live preview does not stop the saved-audio capture used by Parakeet and Whisper.
+**A library of everything you've said**
+- Search by keywords or questions, favorites, editing, export, and Trash. Every transcript shows *what Murmur did*: the words it listened for, the cleanup steps, timings, and how the text was inserted.
+- Insights: words per day, speaking pace, and time saved versus typing.
+- Optional audio retention (7, 30, or 90 days) and storage controls.
 
-In four installed-app EarPods tests, recording setup took 0.33–0.51 seconds from the app's start request to its cue, and microphone stops took 25–63 ms. These are local measurements, not guarantees; the Control gesture adds a 100-ms chord-detection delay. [Measurement scope and regression checks](Benchmarks/startup-results.json).
+**Thoughtful details**
+- Lowers your music while you talk, can leave your clipboard untouched when it pastes, can start quietly at login, and follows light and dark mode.
 
-## Storage and privacy
+## Privacy
 
-Your library stays in `~/Library/Application Support/Murmur/`:
+Recording, recognition, cleanup, and the optional Apple Intelligence features all run on your Mac. Your library lives in `~/Library/Application Support/Murmur/`. Murmur connects to the internet only to download speech models on first use, and, if you turn it on, to check GitHub for a new release. There's no analytics. [SECURITY.md](SECURITY.md) lists exactly what Murmur reads and when.
 
-```text
-history.json             Transcripts and metadata
-history.backup.json      Last successful history snapshot
-Recordings/              Original audio files
-```
-
-History writes are atomic and checkpointed during recording. Unchanged checkpoints are skipped, and the backup reuses the last verified snapshot instead of re-reading it from disk. A missing primary history file can recover from its backup. Interrupted sessions keep recoverable audio. With **Save audio** off, Murmur removes audio only after a nonempty transcription that does not need review; failed, empty, and uncertain recordings keep their audio. An unavailable storage folder or an unsupported history version produces a recoverable error and blocks library changes rather than crashing or overwriting the existing files.
-
-Automatic insertion uses the clipboard and Accessibility permission. Murmur resolves focused editor children to their editable parent and captures the destination at recording start. It waits for shortcut modifiers to release, checks the foreground app, window, editor, and clipboard, then invokes the app's standard Paste menu command when available. Otherwise it sends one complete Command-V key sequence. Custom editors without a usable accessibility text node can receive Paste while their original focus or known window remains unchanged. Secure input, disabled controls, and clearly non-text controls are excluded. Murmur never presses Enter or retries an unconfirmed paste. Settings shows whether insertion was confirmed, Paste was sent without confirmation, or text was only copied. Recordings are not uploaded. Initial model downloads come from Apple's system service or public model repositories.
-
-## Verification
-
-Run the storage, text processing, Control/Fn shortcut, selection replacement, recording-state, worker cancellation, and recognition-deadline checks:
+## Build from source
 
 ```sh
-./test.sh
+./Tools/BuildLocalSpeech.sh --parakeet-only   # once: the Parakeet helper (omit the flag to also build Whisper)
+./build.sh                                    # build and locally sign Murmur.app (quit Murmur first)
+./test.sh                                     # run the test suites
 ```
 
-The standard suite also checks overlapping retries, audio retention, unavailable storage, quit during a queued retry, preview failure with continued capture, and worker timeout/crash recovery. Additional tests under `Tests/` exercise actual local audio-file recognition, buffered capture, saved-audio recovery, and latency using generated speech fixtures. These require the corresponding helpers, models, and system permissions.
+There's no Xcode project; Murmur compiles straight from `Sources/` with `swiftc`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how recording, insertion, storage, and recovery work, and [CONTRIBUTING.md](CONTRIBUTING.md) to get involved.
 
-`Tools/Compatibility/` contains local browser and AppKit editor fixtures for checking exact received text and duplicate paste events. These supplement real destination-app checks; they do not establish compatibility with every application.
+`Tools/Release.sh 1.1` packages a release zip. Builds are signed locally, not notarized, so on another Mac the first launch needs right-click → **Open**.
 
-The [October 4 audit](Benchmarks/audit-results.json) passed the standard suite and generated speech fixtures through Apple, Parakeet, and Whisper, preserving the fixture's first and last words. Installed-app checks verified real microphone capture, audio retention with **Save audio** off, quit/reopen recovery, native text-field insertion, replacement of selected Unicode text, and exactly one Paste call in a native multiline editor. Microphone and Accessibility permissions remained usable after the signed update and relaunch. Recording preferences were restored after these checks.
+## Credits
 
-`Benchmarks/latency-results.json` records limited local measurements, including model preparation and repeated start/stop cycles. These checks do not guarantee accuracy, timing, absence of every bug, or insertion compatibility across every Mac or destination app. Personal recordings and their recognition comparisons are excluded from this repository.
+Murmur stands on [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache 2.0) and NVIDIA's [Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) models (CC BY 4.0, Core ML conversions by FluidInference), with optional [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and OpenAI Whisper (MIT). Full notices are in [Resources/THIRD-PARTY.txt](Resources/THIRD-PARTY.txt).
 
-## Third-party components
+## License
 
-The Parakeet helper uses **FluidAudio 0.12.6**. Whisper uses **whisper.cpp 1.8.7** and **large-v3-turbo Q5_0**. Attribution and dependency license texts are in [Resources/THIRD-PARTY.txt](Resources/THIRD-PARTY.txt) and `Resources/ThirdPartyLicenses/`.
+[MIT](LICENSE) © 2026 Lin Zaw
