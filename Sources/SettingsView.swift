@@ -309,6 +309,12 @@ struct SettingsView: View {
 
     @ViewBuilder private var vocabularyPane: some View {
         Section {
+            Toggle(isOn: $preferences.contextWords) {
+                Text("Learn words from your screen")
+                Text("While you dictate, Murmur listens for names and unusual words shown in the app you’re using, and words you’ve corrected before. It stays on this Mac and nothing is saved.")
+            }
+        }
+        Section {
             HStack(spacing: 8) {
                 TextField("Heard", text: $heardWord, prompt: Text("mer mer")).labelsHidden()
                 Image(systemName: "arrow.right").foregroundStyle(Palette.faint)
@@ -320,7 +326,7 @@ struct SettingsView: View {
         } header: {
             Text("Add a correction")
         } footer: {
-            Text("Replacements apply to every engine. Whisper also uses them as recognition hints.")
+            Text("Replacements apply to every engine, and each word also helps the recognizer listen for it. A single word on its own line works too, e.g. “Recallr”.")
         }
         Section {
             TextEditor(text: $preferences.vocabulary).font(.system(size: 12, design: .monospaced))

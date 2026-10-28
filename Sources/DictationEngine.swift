@@ -265,6 +265,8 @@ final class DictationEngine: ObservableObject {
     private(set) var selectedEngine: RecognitionEngine = .apple
     private var selectedLocale = "en-US"
     private var selectedVocabulary = ""
+    /// Terms gathered from the screen and past corrections for this recording.
+    private(set) var contextTerms: [String] = []
     private var stopRequested = false
     private var captureError: Error?
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
@@ -473,6 +475,7 @@ final class DictationEngine: ObservableObject {
                     let stream = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .unbounded)
                     let speechAnalyzer = SpeechAnalyzer(modules: [transcriber], options: .init(priority: .userInitiated, modelRetention: .lingering))
                     self.analyzer = speechAnalyzer
+                    await Self.setHints(SpeechVocabulary.terms(vocabulary, context: self.contextTerms), on: speechAnalyzer)
                     try await speechAnalyzer.prepareToAnalyze(in: target)
                     guard self.generation == session, !Task.isCancelled else { throw DictationError.cancelled }
                     self.observeResults(transcriber, session: session)
@@ -518,6 +521,21 @@ final class DictationEngine: ObservableObject {
     }
 
     /// Called synchronously from key release, before scheduling any finalization.
+    /// Sets this recording's context terms and passes them to the live preview.
+    func updateContext(_ terms: [String]) {
+        contextTerms = terms
+        guard let analyzer else { return }
+        let hints = SpeechVocabulary.terms(selectedVocabulary, context: terms)
+        Task { await Self.setHints(hints, on: analyzer) }
+    }
+
+    private static func setHints(_ terms: [String], on analyzer: SpeechAnalyzer) async {
+        guard !terms.isEmpty else { return }
+        let context = AnalysisContext()
+        context.contextualStrings = [.general: terms]
+        try? await analyzer.setContext(context)
+    }
+
     @discardableResult func requestStop() -> Bool {
         let requestedAt = ProcessInfo.processInfo.systemUptime
         guard phase == .recording else {
@@ -556,7 +574,8 @@ final class DictationEngine: ObservableObject {
                     let value = await capture.finish(); try checkSession(session); signal = value
                 }
                 pipeline = nil
-                let result = try await localSpeech.transcribe(url, engine: selectedEngine, locale: selectedLocale, vocabulary: selectedVocabulary)
+                let result = try await localSpeech.transcribe(url, engine: selectedEngine, locale: selectedLocale,
+                                                              vocabulary: selectedVocabulary, context: contextTerms)
                 try checkSession(session)
                 liveText = result.text; confidence = result.confidence
             } else {
@@ -614,6 +633,7 @@ final class DictationEngine: ObservableObject {
                 elapsed = Double(file.length) / file.processingFormat.sampleRate
                 let speechAnalyzer = SpeechAnalyzer(modules: [transcriber])
                 analyzer = speechAnalyzer
+                await Self.setHints(SpeechVocabulary.terms(vocabulary), on: speechAnalyzer)
                 observeResults(transcriber, session: session)
                 phase = .finishing
                 if let last = try await speechAnalyzer.analyzeSequence(from: file) {

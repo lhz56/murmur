@@ -19,6 +19,7 @@ final class Preferences: ObservableObject {
     @Published var removeFillers: Bool { didSet { defaults.set(removeFillers, forKey: "removeFillers") } }
     @Published var voiceCommands: Bool { didSet { defaults.set(voiceCommands, forKey: "voiceCommands") } }
     @Published var duckAudio: Bool { didSet { defaults.set(duckAudio, forKey: "duckAudio") } }
+    @Published var contextWords: Bool { didSet { defaults.set(contextWords, forKey: "contextWords") } }
     @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: "onboarded") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
@@ -36,6 +37,7 @@ final class Preferences: ObservableObject {
         removeFillers = defaults.object(forKey: "removeFillers") as? Bool ?? true
         voiceCommands = defaults.object(forKey: "voiceCommands") as? Bool ?? true
         duckAudio = defaults.object(forKey: "duckAudio") as? Bool ?? true
+        contextWords = defaults.object(forKey: "contextWords") as? Bool ?? true
         onboarded = defaults.bool(forKey: "onboarded")
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
@@ -66,6 +68,7 @@ final class AppModel: ObservableObject {
     @Published var activeID: UUID?
     @Published var showSettings = false
     @Published var showOnboarding = false
+    private var contextTask: Task<Void, Never>?
     @Published var errorMessage: String?
     @Published var toast: String?
     @Published var playingID: UUID?
@@ -258,6 +261,7 @@ final class AppModel: ObservableObject {
         microphoneCheck.stop()
         pasteTarget = textInsertion.captureDestination()
         deliveryResult = nil
+        gatherContext()
         var entry = Transcript()
         entry.locale = preferences.locale
         entry.engineName = preferences.recognitionEngine.rawValue
@@ -340,12 +344,31 @@ final class AppModel: ObservableObject {
         persist()
     }
 
+    /// Collects names and unusual words from the app being dictated into, plus
+    /// words corrected in past transcripts, while the user is speaking.
+    private func gatherContext() {
+        contextTask?.cancel()
+        speech.updateContext([])
+        guard preferences.contextWords else { contextTask = nil; return }
+        let pid = pasteTarget?.application.processIdentifier
+        let edits = transcripts.lazy.filter { $0.deletedAt == nil && !$0.originalText.isEmpty && $0.text != $0.originalText }
+            .prefix(200).map { (original: $0.originalText, corrected: $0.text) }
+        contextTask = Task { [weak self] in
+            let terms = await ContextVocabulary.gather(pid: pid, edits: Array(edits))
+            guard !Task.isCancelled, let self else { return }
+            speech.updateContext(terms)
+            timingLog.info("Context terms: \(terms.count, privacy: .public)")
+        }
+    }
+
     private func finishRecording() async {
         if speech.phase == .recording {
             stopRequestedAt = ProcessInfo.processInfo.systemUptime
             speech.requestStop(); playSound("finish")
         }
         guard speech.phase == .finishing else { return }
+        // Context gathering is bounded (~0.3 s) and normally finished long before stop.
+        await contextTask?.value
         onRecordingChanged?(false)
         checkpointTimer?.invalidate(); checkpointTimer = nil
         let id = activeID

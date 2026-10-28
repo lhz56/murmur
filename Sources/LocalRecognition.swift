@@ -115,6 +115,10 @@ enum LocalSpeechError: LocalizedError {
             if type == "progress" { onProgress?(message["fraction"] as? Double ?? 0) }
             else if type == "ready" {
                 startupDeadline?.cancel(); startupDeadline = nil
+                // Load the custom-word model now, so the first boosted dictation stays fast.
+                if var warm = try? JSONSerialization.data(withJSONObject: ["warm": true]) {
+                    warm.append(10); try? input?.fileHandleForWriting.write(contentsOf: warm)
+                }
                 isReady = true; onReadiness?(true)
                 let continuations = ready; ready.removeAll(); continuations.values.forEach { $0.resume() }
             }
@@ -128,7 +132,8 @@ enum LocalSpeechError: LocalizedError {
             } else if type == "error" { fail(LocalSpeechError.failed(message["message"] as? String ?? "Parakeet couldn’t start.")) }
         }
     }
-    func transcribe(_ url: URL) async throws -> RecognitionResult {
+    /// `vocabulary` holds `{"text", "aliases"}` terms; the helper reconfigures only when they change.
+    func transcribe(_ url: URL, vocabulary: [[String: Any]] = []) async throws -> RecognitionResult {
         try await start()
         try Task.checkCancellation()
         let id = UUID().uuidString
@@ -138,7 +143,7 @@ enum LocalSpeechError: LocalizedError {
                 waiting[id] = continuation
                 do {
                     guard let input else { throw LocalSpeechError.failed("Local transcription was stopped.") }
-                    var data = try JSONSerialization.data(withJSONObject: ["id": id, "path": url.path]); data.append(10)
+                    var data = try JSONSerialization.data(withJSONObject: ["id": id, "path": url.path, "vocabulary": vocabulary] as [String: Any]); data.append(10)
                     try input.fileHandleForWriting.write(contentsOf: data)
                     let timeout = requestTimeout
                     requestDeadlines[id] = Task { [weak self] in
@@ -173,6 +178,27 @@ enum LocalSpeechError: LocalizedError {
 }
 
 enum SpeechVocabulary {
+    /// Recognizer hints: the target side of each correction plus context terms.
+    static func terms(_ text: String, context: [String] = []) -> [String] {
+        var seen = Set<String>()
+        return (terms(text) + context).filter { seen.insert($0.lowercased()).inserted }.prefix(100).map { $0 }
+    }
+
+    /// Parakeet boosting terms. "heard => desired" lines make "heard" an alias,
+    /// so a known mishearing is matched even when it sounds a little different.
+    static func boostTerms(_ text: String, context: [String] = []) -> [[String: Any]] {
+        var aliases: [String: [String]] = [:]
+        for line in text.components(separatedBy: .newlines) {
+            let pair = line.components(separatedBy: "=>").map { $0.trimmingCharacters(in: .whitespaces) }
+            if pair.count == 2, !pair[0].isEmpty, !pair[1].isEmpty { aliases[pair[1].lowercased(), default: []].append(pair[0]) }
+        }
+        return terms(text, context: context).map { term in
+            var entry: [String: Any] = ["text": term]
+            if let list = aliases[term.lowercased()] { entry["aliases"] = list }
+            return entry
+        }
+    }
+
     static func terms(_ text: String) -> [String] {
         var seen = Set<String>()
         return text.components(separatedBy: .newlines).compactMap { line in
@@ -197,17 +223,17 @@ enum SpeechVocabulary {
                 FileManager.default.fileExists(atPath: resources.appendingPathComponent("Models/ggml-large-v3-turbo-q5_0.bin").path)
         }
     }
-    func transcribe(_ url: URL, engine: RecognitionEngine, locale: String, vocabulary: String) async throws -> RecognitionResult {
+    func transcribe(_ url: URL, engine: RecognitionEngine, locale: String, vocabulary: String, context: [String] = []) async throws -> RecognitionResult {
         if engine == .parakeet {
             let supported = ["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk"]
             guard supported.contains(String(locale.prefix(2))) else { throw LocalSpeechError.unavailable("Parakeet doesn’t support this language. Choose Apple or Whisper in settings.") }
-            return try await parakeet.transcribe(url)
+            return try await parakeet.transcribe(url, vocabulary: SpeechVocabulary.boostTerms(vocabulary, context: context))
         }
         guard engine == .whisper, let resources = Bundle.main.resourceURL else { throw LocalSpeechError.unavailable("Choose an available local speech engine.") }
         let binary = resources.appendingPathComponent("Helpers/whisper-cli")
         let model = resources.appendingPathComponent("Models/ggml-large-v3-turbo-q5_0.bin")
         guard FileManager.default.isExecutableFile(atPath: binary.path), FileManager.default.fileExists(atPath: model.path) else { throw LocalSpeechError.unavailable("Whisper’s local model is missing from this build.") }
-        let terms = SpeechVocabulary.terms(vocabulary)
+        let terms = SpeechVocabulary.terms(vocabulary, context: context).prefix(40)
         let recognition = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             let temp = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-whisper-\(UUID().uuidString)")

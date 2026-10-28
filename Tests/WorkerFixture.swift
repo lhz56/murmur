@@ -9,8 +9,8 @@ import Foundation
         if CommandLine.arguments[1].hasSuffix("delayed") { Thread.sleep(forTimeInterval: 0.5) }
         emit(["type": "ready"])
         while let line = readLine(), let data = line.data(using: .utf8) {
-            guard let request = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                  let id = request["id"], let path = request["path"] else { continue }
+            guard let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = request["id"] as? String, let path = request["path"] as? String else { continue }
             if path.hasSuffix("cancelled.wav") {
                 Thread.sleep(forTimeInterval: 0.15)
                 emit(["type": "error", "id": id, "message": "Late cancelled error"])

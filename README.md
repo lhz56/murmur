@@ -11,6 +11,7 @@ A native Mac dictation app with local transcription, a searchable recording libr
 - Saved transcripts and audio, search, favorites, editing, export, trash, and interrupted-recording recovery, with keyboard navigation and context menus.
 - Light and dark appearance that follows macOS.
 - Local Parakeet, Apple, and Whisper speech engines, with vocabulary corrections.
+- Context-aware words: names and unusual words on screen in the app you're dictating into, plus words you've corrected before, bias recognition for that recording. Parakeet uses FluidAudio's CTC word spotter (a 110M-parameter model on the Neural Engine, downloaded once) and only swaps a word when the audio supports it. Nothing is stored or uploaded.
 - Optional filler-word cleanup (um, uh, erm) for English, and automatic spacing when you dictate right after existing text.
 - Open at login: Murmur starts quietly in the menu bar.
 - Voice commands: say "new line" or "new paragraph" (English).
