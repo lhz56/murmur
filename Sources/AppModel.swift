@@ -35,6 +35,7 @@ final class Preferences: ObservableObject {
     @Published var dictationKey: DictationKey { didSet { defaults.set(dictationKey.rawValue, forKey: "dictationKey") } }
     @Published var mouseButton: Int { didSet { defaults.set(mouseButton, forKey: "mouseButton") } }
     @Published var typingSpeed: Int { didSet { defaults.set(typingSpeed, forKey: "typingSpeed") } }
+    @Published var checkForUpdates: Bool { didSet { defaults.set(checkForUpdates, forKey: "checkForUpdates") } }
     @Published var microphoneUID: String { didSet { defaults.set(microphoneUID, forKey: "microphoneUID") } }
     @Published var recognitionEngine: RecognitionEngine { didSet { defaults.set(recognitionEngine.rawValue, forKey: "recognitionEngine") } }
     init(preview: Bool) {
@@ -63,6 +64,7 @@ final class Preferences: ObservableObject {
         dictationKey = DictationKey(rawValue: defaults.string(forKey: "dictationKey") ?? "") ?? .control
         mouseButton = defaults.integer(forKey: "mouseButton")
         typingSpeed = defaults.object(forKey: "typingSpeed") as? Int ?? 40
+        checkForUpdates = defaults.bool(forKey: "checkForUpdates")
         microphoneUID = defaults.string(forKey: "microphoneUID") ?? ""
         recognitionEngine = RecognitionEngine(rawValue: defaults.string(forKey: "recognitionEngine") ?? "") ?? (preview ? .apple : .parakeet)
     }
@@ -90,6 +92,7 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var showOnboarding = false
     @Published var showStats = false
+    let updates = UpdateChecker()
     /// Answer from Ask, shown above the list while the question is unchanged.
     @Published var answer: (question: String, text: String)?
     @Published var answering = false

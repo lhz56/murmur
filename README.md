@@ -1,6 +1,16 @@
 # Murmur
 
+[![Tests](https://github.com/lhz56/murmur/actions/workflows/tests.yml/badge.svg)](https://github.com/lhz56/murmur/actions/workflows/tests.yml)
+
 A native Mac dictation app with local transcription, a searchable recording library, and automatic insertion into the text box you are using. No subscription, account, API key, analytics, or cloud transcription.
+
+## Quick start
+
+```sh
+git clone https://github.com/lhz56/murmur.git && cd murmur && ./install.sh
+```
+
+`install.sh` checks your Mac, builds the Parakeet speech helper the first time, builds and signs Murmur, installs it in Applications, and opens it. Run it again after `git pull` to update.
 
 ## Features
 
@@ -22,6 +32,13 @@ A native Mac dictation app with local transcription, a searchable recording libr
 - Lowers other audio while you record, then fades it back.
 - Dictation key: Control, Right Option, Right Command, or Fn.
 - A first-run welcome guide for permissions and a live try-it step (Murmur menu → Welcome Guide).
+- Per-app writing styles ("In Mail, professional and concise"), applied by Apple's on-device model only in apps you choose.
+- "What Murmur did" on every transcript: words listened for, words recognized, cleanup steps, timings, and how the text was inserted.
+- Type Last Transcript (Control-Option-T) for apps that block pasting, and automatic typing when a paste can't be sent.
+- Hold a middle or side mouse button to dictate.
+- Insights: words dictated, speaking pace, and time saved versus typing.
+- Optional audio retention (7, 30, or 90 days; text is kept) and storage controls.
+- Optional, off-by-default update check against GitHub Releases.
 - Microphone selection and input testing, shortcut testing, and a no-audio insertion check.
 
 ## Requirements
@@ -58,6 +75,10 @@ For an Apple-only build, skip `Tools/BuildLocalSpeech.sh`, run `./build.sh`, and
 
 `Tools/SignApp.sh` creates or reuses a private local signing certificate in the login Keychain. macOS may ask you to approve codesign access when building. Reusing the same certificate gives future builds a consistent app identity. The private key stays on your Mac and is not part of this repository. This is local signing, not Developer ID distribution or notarization. `build.sh` builds and verifies a staged app before replacing an existing bundle and refuses to modify a running Murmur app.
 
+## Releases
+
+`Tools/Release.sh 1.1` sets the version, builds, and writes `dist/Murmur-1.1.zip`, then prints the `gh release create` command to publish it. Builds are locally signed, not notarized, so on another Mac the first launch needs right-click → **Open**. GitHub Actions runs `test.sh` on every push (`.github/workflows/tests.yml`).
+
 ## Use
 
 1. Open **Murmur.app** and allow microphone access when macOS asks.
@@ -72,7 +93,7 @@ In the library, use ↑/↓ to move between transcripts, ⌘C to copy the select
 
 **Test microphone** displays the input level without saving audio. **Test insertion** gives you eight seconds to focus a text box, then inserts a test sentence without recording. Closing the library leaves Murmur in the menu bar; **Command + Q** quits.
 
-The floating pill does not take keyboard focus. Capture stops synchronously on key release; final transcription still takes processing time. Very short or uncertain results with weak audio are saved for review rather than automatically inserted. Vocabulary corrections apply explicitly configured replacements; Murmur does not use a language model to rewrite your meaning.
+The floating pill does not take keyboard focus. Capture stops synchronously on key release; final transcription still takes processing time. Very short or uncertain results with weak audio are saved for review rather than automatically inserted. Vocabulary corrections apply explicitly configured replacements. Apple's on-device language model is used only for features you trigger or configure: "no wait" style corrections when such a phrase is heard, edit by voice, Ask, and per-app styles. Everything else is rule-based.
 
 The recording cue follows the first copied microphone buffer, without waiting for disk writes or meter updates. Murmur prepares a stopped microphone graph ahead of use and reuses it after recording; it captures no audio while idle. Input taps use the microphone's current hardware format. A small Objective-C bridge converts native tap exceptions into recoverable errors because Swift cannot catch those exceptions directly.
 

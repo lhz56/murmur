@@ -31,9 +31,11 @@ struct SettingsView: View {
     @State private var heardWord = ""
     @State private var desiredWord = ""
     @StateObject private var login = LaunchAtLogin()
+    @ObservedObject private var updates: UpdateChecker
 
     init(model: AppModel, preferences: Preferences, speech: DictationEngine, microphoneCheck: MicrophoneCheck, initialPane: Pane = .shortcut) {
         self.model = model; self.preferences = preferences; self.speech = speech; self.microphoneCheck = microphoneCheck
+        self.updates = model.updates
         _pane = State(initialValue: initialPane)
     }
 
@@ -172,6 +174,25 @@ struct SettingsView: View {
             }
             LabeledContent("Stop and keep a recording") { ShortcutKeys(keys: ["Esc"]) }
         } header: { Text("Always available") }
+        Section {
+            Toggle(isOn: $preferences.checkForUpdates) {
+                Text("Check for updates")
+                Text("Once a day, ask GitHub if a newer Murmur is out. Nothing about you is sent.")
+            }
+            .onChange(of: preferences.checkForUpdates) { _, on in if on { Task { await updates.check(force: true) } } }
+            if preferences.checkForUpdates {
+                LabeledContent {
+                    if let update = updates.available {
+                        Button("Get \(update.version)…") { NSWorkspace.shared.open(update.url) }
+                    } else {
+                        Button(updates.checking ? "Checking…" : "Check now") { Task { await updates.check(force: true) } }.disabled(updates.checking)
+                    }
+                } label: {
+                    Text("Murmur \(updates.currentVersion)")
+                    Text(updates.available != nil ? "A new version is available." : updates.lastError ?? "You’re up to date.")
+                }
+            }
+        }
         Section {
             Toggle(isOn: Binding(get: { login.isEnabled }, set: { login.set($0) })) {
                 Text("Open at login")

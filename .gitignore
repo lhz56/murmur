@@ -28,3 +28,6 @@ Resources/Models/
 Recordings/
 history*.json
 Benchmarks/recognition-results.json
+
+# Release archives
+dist/

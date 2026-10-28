@@ -148,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         if !model.isPreview { model.cleanUpOldAudio() }
+        if !model.isPreview, model.preferences.checkForUpdates { Task { await model.updates.check() } }
         if !model.isPreview, shortcut.register() != noErr {
             model.errorMessage = "Control Option Space is already used by another app. Close that app to use Murmur’s global shortcut. Recording from Murmur still works."
         }
@@ -262,6 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = item("Type Last Transcript", last == nil || busy ? nil : #selector(typeLastTranscript), key: "t", modifiers: [.control, .option])
         _ = item("Edit Selection by Voice", busy ? nil : #selector(editSelectionByVoice), key: "e", modifiers: [.control, .option])
         menu.addItem(.separator())
+        if let update = model.updates.available {
+            _ = item("Update Available: Murmur \(update.version)…", #selector(openUpdate))
+        }
         _ = item("Open Library", #selector(openLibrary))
         _ = item("Settings…", #selector(openSettings))
         menu.addItem(.separator())
@@ -314,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func pasteLastTranscript() { model.pasteLastTranscript() }
     @objc private func importAudio() { openLibrary(); model.importAudio() }
     @objc private func focusSearch() { openLibrary(); NotificationCenter.default.post(name: .murmurSearch, object: nil) }
+    @objc private func openUpdate() { if let url = model.updates.available?.url { NSWorkspace.shared.open(url) } }
     @objc private func typeLastTranscript() { model.typeLastTranscript() }
     @objc private func editSelectionByVoice() { model.toggleEditRecording() }
     @objc private func showWelcome() { openLibrary(); model.showSettings = false; model.showOnboarding = true }
