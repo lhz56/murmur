@@ -5,7 +5,7 @@ import AppKit
 struct SettingsView: View {
     enum Pane: String, CaseIterable, Identifiable {
         case shortcut = "Shortcut", microphone = "Microphone", transcription = "Transcription"
-        case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary"
+        case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary", snippets = "Snippets"
         var id: Self { self }
         var symbol: String {
             switch self {
@@ -15,6 +15,7 @@ struct SettingsView: View {
             case .insertion: return "text.cursor"
             case .recordings: return "externaldrive"
             case .vocabulary: return "character.book.closed"
+            case .snippets: return "text.badge.plus"
             }
         }
     }
@@ -88,6 +89,7 @@ struct SettingsView: View {
         case .insertion: insertionPane
         case .recordings: recordingsPane
         case .vocabulary: vocabularyPane
+        case .snippets: snippetsPane
         }
     }
 
@@ -238,6 +240,19 @@ struct SettingsView: View {
                 Text("Voice commands")
                 Text("Say “new line” or “new paragraph” to break the text. English only.")
             }
+            Toggle(isOn: $preferences.selfCorrections) {
+                Text("Fix changes of mind")
+                Text(LocalModel.isAvailable ? "“Scratch that” removes the last sentence, and “Tuesday, no wait, Wednesday” keeps only Wednesday."
+                     : "“Scratch that” removes the last sentence. Turn on Apple Intelligence to also fix “no wait” and “I mean”.")
+            }
+            Toggle(isOn: $preferences.smartFormatting) {
+                Text("Smart formatting")
+                Text("“lin at gmail dot com” becomes lin@gmail.com, and “one… two…” becomes a numbered list.")
+            }
+            Toggle(isOn: $preferences.appStyle) {
+                Text("Match each app’s style")
+                Text("Leave off the final period in chat apps and terminals.")
+            }
             Toggle(isOn: $preferences.autoPaste) {
                 Text("Insert into active app")
                 Text("Paste the transcript at your cursor when recording finishes.")
@@ -303,6 +318,39 @@ struct SettingsView: View {
             } label: {
                 Text("Library folder")
                 Text("Application Support / Murmur")
+            }
+        }
+    }
+
+    @State private var snippetTrigger = ""
+    @State private var snippetText = ""
+
+    @ViewBuilder private var snippetsPane: some View {
+        Section {
+            TextField("Say", text: $snippetTrigger, prompt: Text("my email"))
+            TextField("Insert", text: $snippetText, prompt: Text("you@example.com"), axis: .vertical).lineLimit(1...4)
+            HStack {
+                Spacer()
+                Button("Add snippet") {
+                    preferences.snippets.append(TextPolish.Snippet(trigger: snippetTrigger.trimmingCharacters(in: .whitespaces),
+                                                                   text: snippetText))
+                    snippetTrigger = ""; snippetText = ""
+                }.disabled(snippetTrigger.trimmingCharacters(in: .whitespaces).isEmpty || snippetText.isEmpty)
+            }
+        } header: { Text("New snippet") } footer: {
+            Text("Dictate just the phrase, or “insert my email” inside a sentence, and Murmur types the saved text.")
+        }
+        if !preferences.snippets.isEmpty {
+            Section("Your snippets") {
+                ForEach(preferences.snippets) { snippet in
+                    LabeledContent {
+                        Button { preferences.snippets.removeAll { $0.id == snippet.id } } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless).help("Remove snippet")
+                    } label: {
+                        Text("“\(snippet.trigger)”")
+                        Text(snippet.text).lineLimit(2)
+                    }
+                }
             }
         }
     }

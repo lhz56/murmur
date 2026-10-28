@@ -20,6 +20,10 @@ final class Preferences: ObservableObject {
     @Published var voiceCommands: Bool { didSet { defaults.set(voiceCommands, forKey: "voiceCommands") } }
     @Published var duckAudio: Bool { didSet { defaults.set(duckAudio, forKey: "duckAudio") } }
     @Published var contextWords: Bool { didSet { defaults.set(contextWords, forKey: "contextWords") } }
+    @Published var selfCorrections: Bool { didSet { defaults.set(selfCorrections, forKey: "selfCorrections") } }
+    @Published var smartFormatting: Bool { didSet { defaults.set(smartFormatting, forKey: "smartFormatting") } }
+    @Published var appStyle: Bool { didSet { defaults.set(appStyle, forKey: "appStyle") } }
+    @Published var snippets: [TextPolish.Snippet] { didSet { defaults.set(try? JSONEncoder().encode(snippets), forKey: "snippets") } }
     @Published var onboarded: Bool { didSet { defaults.set(onboarded, forKey: "onboarded") } }
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
@@ -38,6 +42,10 @@ final class Preferences: ObservableObject {
         voiceCommands = defaults.object(forKey: "voiceCommands") as? Bool ?? true
         duckAudio = defaults.object(forKey: "duckAudio") as? Bool ?? true
         contextWords = defaults.object(forKey: "contextWords") as? Bool ?? true
+        selfCorrections = defaults.object(forKey: "selfCorrections") as? Bool ?? true
+        smartFormatting = defaults.object(forKey: "smartFormatting") as? Bool ?? true
+        appStyle = defaults.object(forKey: "appStyle") as? Bool ?? true
+        snippets = defaults.data(forKey: "snippets").flatMap { try? JSONDecoder().decode([TextPolish.Snippet].self, from: $0) } ?? []
         onboarded = defaults.bool(forKey: "onboarded")
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
@@ -344,6 +352,26 @@ final class AppModel: ObservableObject {
         persist()
     }
 
+    /// Turns raw recognizer output into finished text: fillers, replacements and
+    /// voice commands, then "scratch that" and self-corrections, addresses and
+    /// lists, per-app style, and snippets. Only a heard correction phrase
+    /// reaches the on-device model.
+    func polish(_ original: String, bundleID: String?, vocabulary: String? = nil,
+                removeFillers: Bool? = nil, voiceCommands: Bool? = nil) async -> String {
+        var text = TextTools.clean(original, replacements: vocabulary ?? preferences.vocabulary,
+                                   removeFillers: removeFillers ?? preferences.cleansFillers,
+                                   voiceCommands: voiceCommands ?? preferences.usesVoiceCommands)
+        if preferences.locale.hasPrefix("en") {
+            if preferences.selfCorrections {
+                text = TextPolish.applyingScratchThat(text)
+                if TextPolish.hasCorrectionCue(text), let fixed = await LocalModel.resolveSelfCorrections(text) { text = fixed }
+            }
+            if preferences.smartFormatting { text = TextPolish.formattingLists(TextPolish.formattingAddresses(text)) }
+            if preferences.appStyle { text = TextPolish.styled(text, for: .init(bundleID: bundleID)) }
+        }
+        return TextPolish.expandingSnippets(text, snippets: preferences.snippets)
+    }
+
     /// Collects names and unusual words from the app being dictated into, plus
     /// words corrected in past transcripts, while the user is speaking.
     private func gatherContext() {
@@ -375,7 +403,8 @@ final class AppModel: ObservableObject {
         do {
             let original = try await speech.stop()
             guard activeID == id, !Task.isCancelled else { return }
-            let text = TextTools.clean(original, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers, voiceCommands: preferences.usesVoiceCommands)
+            let text = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
+            guard activeID == id, !Task.isCancelled else { return }
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
@@ -644,7 +673,9 @@ final class AppModel: ObservableObject {
             do {
                 let original = try await speech.transcribeFile(url, localeID: locale, recognitionEngine: engine, vocabulary: vocabulary)
                 guard !Task.isCancelled, activeID == entry.id else { return }
-                updateActive(text: TextTools.clean(original, replacements: vocabulary, removeFillers: removeFillers, voiceCommands: voiceCommands), duration: speech.elapsed,
+                let text = await polish(original, bundleID: nil, vocabulary: vocabulary, removeFillers: removeFillers, voiceCommands: voiceCommands)
+                guard !Task.isCancelled, activeID == entry.id else { return }
+                updateActive(text: text, duration: speech.elapsed,
                              status: original.isEmpty ? .failed : .complete)
                 if let i = index(entry.id) { transcripts[i].originalText = original }
                 if let i = index(entry.id) {

@@ -43,7 +43,8 @@ import CoreGraphics
         model.speech.phase = .recording
         model.handleFn(.finishHold)
         assert(model.speech.phase == .finishing)
-        try await Task.sleep(for: .milliseconds(50))
+        let t0 = Date()
+        while model.speech.phase != .idle && Date().timeIntervalSince(t0) < 1 { try await Task.sleep(for: .milliseconds(10)) }
         assert(model.speech.phase == .idle)
         // A hold released before the start Task executes must never open a mic.
         model.handleFn(.startHold)
