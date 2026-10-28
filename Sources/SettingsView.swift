@@ -116,6 +116,15 @@ struct SettingsView: View {
                 Picker("Key behavior", selection: $preferences.fnBehavior) {
                     ForEach(FnBehavior.allCases, id: \.self) { behavior in Text(behavior.rawValue).tag(behavior) }
                 }
+                Picker(selection: $preferences.mouseButton) {
+                    Text("Off").tag(0)
+                    Text("Middle button").tag(2)
+                    Text("Back side button").tag(3)
+                    Text("Forward side button").tag(4)
+                } label: {
+                    Text("Mouse button")
+                    Text("Hold it to dictate, release to finish.")
+                }
             }
         }
         if preferences.fnEnabled {
@@ -308,6 +317,28 @@ struct SettingsView: View {
                 Text("Save audio")
                 Text("Keep recordings for playback and transcription retries.")
             }
+            if preferences.keepAudio {
+                Picker(selection: $preferences.audioRetentionDays) {
+                    Text("Forever").tag(0)
+                    Text("90 days").tag(90)
+                    Text("30 days").tag(30)
+                    Text("7 days").tag(7)
+                } label: {
+                    Text("Keep audio for")
+                    Text("Older recordings lose their audio; the text stays. Recordings that need a retry are kept.")
+                }
+                .onChange(of: preferences.audioRetentionDays) { _, _ in model.cleanUpOldAudio(); refreshAudioUsage() }
+            }
+            LabeledContent {
+                Button("Delete saved audio…") { confirmAudioDelete = true }.disabled(audioUsage == 0)
+            } label: {
+                Text("Storage")
+                Text(audioUsage.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) + " of recordings" } ?? "Measuring…")
+            }
+            .onAppear { refreshAudioUsage() }
+            .confirmationDialog("Delete saved audio?", isPresented: $confirmAudioDelete) {
+                Button("Delete Audio", role: .destructive) { model.deleteAllAudio(); refreshAudioUsage() }
+            } message: { Text("Transcripts stay in your library. Recordings that still need a retry are kept.") }
             Toggle(isOn: $preferences.sounds) {
                 Text("Recording sounds")
                 Text("Play a soft chime when recording starts and stops.")
@@ -332,6 +363,17 @@ struct SettingsView: View {
                 Text("Library folder")
                 Text("Application Support / Murmur")
             }
+        }
+    }
+
+    @State private var audioUsage: Int64?
+    @State private var confirmAudioDelete = false
+
+    private func refreshAudioUsage() {
+        let directory = model.storage.audioDirectory
+        Task.detached(priority: .utility) {
+            let bytes = AppModel.audioBytes(in: directory)
+            await MainActor.run { audioUsage = bytes }
         }
     }
 

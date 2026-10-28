@@ -87,6 +87,11 @@ final class FnShortcut {
     var onAction: ((FnKeyState.Action) -> Void)?
     var onAvailability: ((Bool) -> Void)?
     var onFnSignal: ((Bool) -> Void)?
+    /// Mouse button number to hold for dictation (2 middle, 3 back, 4 forward); 0 is off.
+    var mouseButton: () -> Int = { 0 }
+    var onMouse: ((Bool) -> Void)?
+    private var installedMouse = 0
+    private var mouseDown = false
     var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -108,17 +113,21 @@ final class FnShortcut {
 
     func refresh() {
         if !enabled() { stop(); onAvailability?(false); return }
-        if installedKey != trigger() { stop() }
+        if installedKey != trigger() || installedMouse != mouseButton() { stop() }
         installedKey = trigger()
+        installedMouse = mouseButton()
         defer { updateControlPolling() }
         if let tap, AXIsProcessTrusted(), CFMachPortIsValid(tap) { onAvailability?(true); return }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes); self.source = nil }
         if let tap { CFMachPortInvalidate(tap); self.tap = nil }
         if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }
         if AXIsProcessTrusted() {
-            let mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue) |
+            var mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue) |
                        (CGEventMask(1) << CGEventType.keyDown.rawValue) |
                        (CGEventMask(1) << CGEventType.keyUp.rawValue)
+            if installedMouse != 0 {
+                mask |= (CGEventMask(1) << CGEventType.otherMouseDown.rawValue) | (CGEventMask(1) << CGEventType.otherMouseUp.rawValue)
+            }
             let callback: CGEventTapCallBack = { _, type, event, context in
                 guard let context else { return Unmanaged.passUnretained(event) }
                 let shortcut = Unmanaged<FnShortcut>.fromOpaque(context).takeUnretainedValue()
@@ -235,6 +244,14 @@ final class FnShortcut {
 
     func handle(type: CGEventType, event: CGEvent) -> Bool {
         guard enabled() else { return false }
+        if type == .otherMouseDown || type == .otherMouseUp {
+            let button = mouseButton()
+            guard button != 0, event.getIntegerValueField(.mouseEventButtonNumber) == Int64(button) else { return false }
+            let down = type == .otherMouseDown
+            // The press is ours: don't also send the browser Back or Forward.
+            if down != mouseDown { mouseDown = down; onMouse?(down) }
+            return true
+        }
         if let held = releaseRequiredFor {
             if event.flags.contains(held.flag) { return false }
             releaseRequiredFor = nil
@@ -348,6 +365,8 @@ final class FnShortcut {
 
     func stop() {
         abandonHeldInput()
+        if mouseDown { mouseDown = false; onMouse?(false) }
+        installedMouse = 0
         controlTimer?.invalidate(); controlTimer = nil; controlPolling = .off
         installedKey = nil
         if let localMonitor { NSEvent.removeMonitor(localMonitor); self.localMonitor = nil }

@@ -195,5 +195,22 @@ import CoreGraphics
         option.sampleControl(flags: [], keyDownCount: 7)
         assert(optionActions.isEmpty) // Right Option chords are left to the app.
         print("PASS: Right Option hold ignores Left Option and chords")
+
+        let mouse = FnShortcut()
+        mouse.trigger = { .control }
+        var mouseEvents: [Bool] = []
+        mouse.onMouse = { mouseEvents.append($0) }
+        func click(_ type: CGEventType, button: Int64) -> CGEvent {
+            let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: .zero, mouseButton: .center)!
+            event.setIntegerValueField(.mouseEventButtonNumber, value: button)
+            return event
+        }
+        assert(!mouse.handle(type: .otherMouseDown, event: click(.otherMouseDown, button: 3))) // Off by default.
+        mouse.mouseButton = { 3 }
+        assert(mouse.handle(type: .otherMouseDown, event: click(.otherMouseDown, button: 3)))
+        assert(mouse.handle(type: .otherMouseUp, event: click(.otherMouseUp, button: 3)))
+        assert(!mouse.handle(type: .otherMouseDown, event: click(.otherMouseDown, button: 4))) // Other buttons pass through.
+        assert(mouseEvents == [true, false], "\(mouseEvents)")
+        print("PASS: holding the chosen mouse button starts and finishes dictation; other buttons pass through")
     }
 }

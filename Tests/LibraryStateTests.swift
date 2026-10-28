@@ -21,6 +21,28 @@ import AppKit
             throw NSError(domain: "Murmur.Tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Operation did not return to idle"])
         }
 
+        // Old clean recordings lose their audio; recent, failed, and flagged ones keep it.
+        do {
+            var old = Transcript(); old.status = .complete; old.text = "Old note"; old.audioFile = "old.m4a"
+            old.createdAt = Date().addingTimeInterval(-40 * 86_400)
+            var recent = old; recent.id = UUID(); recent.audioFile = "recent.m4a"; recent.createdAt = Date()
+            var failed = old; failed.id = UUID(); failed.audioFile = "failed.m4a"; failed.status = .failed
+            var flagged = old; flagged.id = UUID(); flagged.audioFile = "flagged.m4a"; flagged.reviewReason = "Unclear"
+            model.transcripts = [old, recent, failed, flagged]
+            try FileManager.default.createDirectory(at: model.storage.audioDirectory, withIntermediateDirectories: true)
+            for entry in model.transcripts { FileManager.default.createFile(atPath: model.storage.audioURL(for: entry)!.path, contents: Data([1, 2, 3])) }
+            model.preferences.audioRetentionDays = 0
+            check(model.cleanUpOldAudio() == 0, "retention off keeps all audio")
+            model.preferences.audioRetentionDays = 30
+            check(model.cleanUpOldAudio() == 1, "only the old clean recording is removed")
+            check(model.transcripts[0].audioFile == nil && !FileManager.default.fileExists(atPath: model.storage.audioDirectory.appendingPathComponent("old.m4a").path), "old audio file deleted")
+            check(model.transcripts[1].audioFile != nil && model.transcripts[2].audioFile != nil && model.transcripts[3].audioFile != nil, "other audio kept")
+            check(model.deleteAllAudio() == 1 && model.transcripts[2].audioFile != nil, "delete all keeps audio needed for retry")
+            check(AppModel.audioBytes(in: model.storage.audioDirectory) == 6, "usage counts remaining files")
+            model.preferences.audioRetentionDays = 0
+            for entry in model.transcripts { if let url = model.storage.audioURL(for: entry) { try? FileManager.default.removeItem(at: url) } }
+        }
+
         // Neither missing source may capture a microphone or launch a model.
         // A second synchronous click must not reserve a different transcript.
         var first = Transcript(); first.status = .interrupted; first.audioFile = "missing-first.m4a"

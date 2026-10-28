@@ -121,6 +121,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             model.fnSignalSeen = true
             if model.isTestingFn { model.fnTestPresses += 1 }
         }
+        fnShortcut.mouseButton = { [weak self] in self?.model.preferences.mouseButton ?? 0 }
+        fnShortcut.onMouse = { [weak self] down in self?.model.handleFn(down ? .startHold : .finishHold) }
+        model.preferences.$mouseButton.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.fnShortcut.refresh() }
+        }.store(in: &subscriptions)
         model.refreshFn = { [weak self] in self?.fnShortcut.refresh() }
         model.resetFnInput = { [weak self] in self?.fnShortcut.resetInput() }
         model.preferences.$fnEnabled.dropFirst().sink { [weak self] _ in
@@ -142,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             }
         }
+        if !model.isPreview { model.cleanUpOldAudio() }
         if !model.isPreview, shortcut.register() != noErr {
             model.errorMessage = "Control Option Space is already used by another app. Close that app to use Murmur’s global shortcut. Recording from Murmur still works."
         }

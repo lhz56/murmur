@@ -14,6 +14,8 @@ final class Preferences: ObservableObject {
     @Published var autoCopy: Bool { didSet { defaults.set(autoCopy, forKey: "autoCopy") } }
     @Published var autoPaste: Bool { didSet { defaults.set(autoPaste, forKey: "autoPaste") } }
     @Published var keepAudio: Bool { didSet { defaults.set(keepAudio, forKey: "keepAudio") } }
+    /// Delete saved audio this many days after recording; 0 keeps it forever.
+    @Published var audioRetentionDays: Int { didSet { defaults.set(audioRetentionDays, forKey: "audioRetentionDays") } }
     @Published var sounds: Bool { didSet { defaults.set(sounds, forKey: "sounds") } }
     @Published var vocabulary: String { didSet { defaults.set(vocabulary, forKey: "vocabulary") } }
     @Published var removeFillers: Bool { didSet { defaults.set(removeFillers, forKey: "removeFillers") } }
@@ -30,6 +32,7 @@ final class Preferences: ObservableObject {
     @Published var fnEnabled: Bool { didSet { defaults.set(fnEnabled, forKey: "fnEnabled") } }
     @Published var fnBehavior: FnBehavior { didSet { defaults.set(fnBehavior.rawValue, forKey: "fnBehavior") } }
     @Published var dictationKey: DictationKey { didSet { defaults.set(dictationKey.rawValue, forKey: "dictationKey") } }
+    @Published var mouseButton: Int { didSet { defaults.set(mouseButton, forKey: "mouseButton") } }
     @Published var microphoneUID: String { didSet { defaults.set(microphoneUID, forKey: "microphoneUID") } }
     @Published var recognitionEngine: RecognitionEngine { didSet { defaults.set(recognitionEngine.rawValue, forKey: "recognitionEngine") } }
     init(preview: Bool) {
@@ -38,6 +41,7 @@ final class Preferences: ObservableObject {
         autoCopy = defaults.object(forKey: "autoCopy") as? Bool ?? true
         autoPaste = defaults.object(forKey: "autoPaste") as? Bool ?? true
         keepAudio = defaults.object(forKey: "keepAudio") as? Bool ?? true
+        audioRetentionDays = defaults.integer(forKey: "audioRetentionDays")
         sounds = defaults.object(forKey: "sounds") as? Bool ?? true
         vocabulary = defaults.string(forKey: "vocabulary") ?? ""
         removeFillers = defaults.object(forKey: "removeFillers") as? Bool ?? true
@@ -54,6 +58,7 @@ final class Preferences: ObservableObject {
         fnEnabled = defaults.object(forKey: "fnEnabled") as? Bool ?? true
         fnBehavior = FnBehavior(rawValue: defaults.string(forKey: "fnBehavior") ?? "") ?? .hold
         dictationKey = DictationKey(rawValue: defaults.string(forKey: "dictationKey") ?? "") ?? .control
+        mouseButton = defaults.integer(forKey: "mouseButton")
         microphoneUID = defaults.string(forKey: "microphoneUID") ?? ""
         recognitionEngine = RecognitionEngine(rawValue: defaults.string(forKey: "recognitionEngine") ?? "") ?? (preview ? .apple : .parakeet)
     }
@@ -531,6 +536,7 @@ final class AppModel: ObservableObject {
         activeID = nil
         stopRequestedAt = nil
         fnHoldInProgress = false
+        cleanUpOldAudio()
         onRecordingChanged?(false)
         let finished = transcripts.first { $0.id == id }
         let heardNothing = speech.liveText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -596,6 +602,46 @@ final class AppModel: ObservableObject {
         guard requireWritableLibrary(), let i = index(id), id != activeID else { return }
         transcripts[i].deletedAt = nil; persist(); notify("Restored to your library")
     }
+    /// Audio that's safe to drop: the transcript finished cleanly, so the
+    /// recording isn't needed to retry or review it.
+    private func audioIsDisposable(_ entry: Transcript) -> Bool {
+        entry.audioFile != nil && entry.id != activeID && entry.status == .complete
+            && entry.reviewReason == nil && !entry.text.isEmpty
+    }
+
+    /// Deletes saved audio older than the retention setting. Text is kept.
+    @discardableResult
+    func cleanUpOldAudio(now: Date = Date()) -> Int {
+        guard preferences.audioRetentionDays > 0, writesEnabled else { return 0 }
+        let cutoff = now.addingTimeInterval(-Double(preferences.audioRetentionDays) * 86_400)
+        return removeAudio { $0.createdAt < cutoff }
+    }
+
+    /// "Delete all saved audio": recordings still needed for a retry are kept.
+    @discardableResult
+    func deleteAllAudio() -> Int { removeAudio { _ in true } }
+
+    private func removeAudio(where shouldRemove: (Transcript) -> Bool) -> Int {
+        var removed = 0
+        for i in transcripts.indices where audioIsDisposable(transcripts[i]) && shouldRemove(transcripts[i]) {
+            if let url = storage.audioURL(for: transcripts[i]) {
+                if FileManager.default.fileExists(atPath: url.path) {
+                    guard (try? FileManager.default.removeItem(at: url)) != nil else { continue }
+                }
+            }
+            transcripts[i].audioFile = nil
+            removed += 1
+        }
+        if removed > 0 { persist() }
+        return removed
+    }
+
+    /// Bytes used by saved recordings.
+    nonisolated static func audioBytes(in directory: URL) -> Int64 {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        return files.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    }
+
     func permanentlyDelete(_ id: UUID) {
         guard requireWritableLibrary(), let i = index(id), id != activeID, transcripts[i].deletedAt != nil else { return }
         let old = transcripts
