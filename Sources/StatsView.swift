@@ -7,11 +7,10 @@ struct StatsView: View {
     @ObservedObject var preferences: Preferences
     @Environment(\.dismiss) private var dismiss
     @State private var hovered: Date?
-
-    private var stats: LibraryStats { LibraryStats(model.transcripts, typingSpeed: preferences.typingSpeed) }
+    /// Computed once per change, not on every hover.
+    @State private var stats = LibraryStats([], typingSpeed: 40)
 
     var body: some View {
-        let stats = stats
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text("Insights").font(.system(size: 15, weight: .semibold))
@@ -40,9 +39,14 @@ struct StatsView: View {
             }.padding(24)
         }
         .frame(width: 720, height: 500)
+        .onAppear { recompute() }
+        .onChange(of: preferences.typingSpeed) { _, _ in recompute() }
+        .onChange(of: model.transcripts.count) { _, _ in recompute() }
         .background(Palette.canvas)
         .foregroundStyle(Palette.ink)
     }
+
+    private func recompute() { stats = LibraryStats(model.transcripts, typingSpeed: preferences.typingSpeed) }
 
     private func tile(_ title: String, _ value: String, detail: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {

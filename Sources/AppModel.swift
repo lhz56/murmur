@@ -286,9 +286,9 @@ final class AppModel: ObservableObject {
     }
 
     private func beginRecording() async {
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else { editSelection = nil; return }
         guard activeID == nil, speech.phase == .idle else { return }
-        guard requireWritableLibrary() else { showWindow?(); return }
+        guard requireWritableLibrary() else { editSelection = nil; showWindow?(); return }
         let requestedAt = ProcessInfo.processInfo.systemUptime
         insertionTestTask?.cancel()
         errorMessage = nil
@@ -308,7 +308,7 @@ final class AppModel: ObservableObject {
         filter = .all; search = ""
         guard persist(), let audioURL = storage.audioURL(for: entry) else {
             transcripts.removeAll { $0.id == entry.id }
-            activeID = nil; selectedID = nil; pasteTarget = nil; fnHoldInProgress = false
+            activeID = nil; selectedID = nil; pasteTarget = nil; fnHoldInProgress = false; editSelection = nil
             return
         }
         hudTask?.cancel(); hudMessage = nil; hudDetail = nil; hudVisible = true; showHUD?(true)
@@ -327,7 +327,7 @@ final class AppModel: ObservableObject {
             }
         } catch {
             guard activeID == entry.id, startingID == entry.id else { return }
-            startingID = nil
+            startingID = nil; editSelection = nil
             checkpointTimer?.invalidate(); checkpointTimer = nil
             let cancelled = (error as? DictationError).map { if case .cancelled = $0 { return true }; return false } ?? false
             if cancelled && !speech.signal.hasFrames {
@@ -459,13 +459,23 @@ final class AppModel: ObservableObject {
         guard preferences.contextWords else { contextTask = nil; return }
         let pid = pasteTarget?.application.processIdentifier
         let contacts = preferences.contactNames
-        let edits = transcripts.lazy.filter { $0.deletedAt == nil && !$0.originalText.isEmpty && $0.text != $0.originalText }
-            .prefix(200).map { (original: $0.originalText, corrected: $0.text) }
+        // Only edits you made yourself in the library teach Murmur new words.
+        let edits = transcripts.lazy.filter { $0.deletedAt == nil && $0.editedFrom != nil && $0.text != $0.editedFrom }
+            .prefix(200).map { (original: $0.editedFrom ?? "", corrected: $0.text) }
         contextTask = Task { [weak self] in
             let terms = await ContextVocabulary.gather(pid: pid, edits: Array(edits), contacts: contacts)
             guard !Task.isCancelled, let self else { return }
             speech.updateContext(terms)
             timingLog.info("Context terms: \(terms.count, privacy: .public)")
+        }
+    }
+
+    private static func wait(for task: Task<Void, Never>, upTo limit: Duration) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await task.value }
+            group.addTask { try? await Task.sleep(for: limit) }
+            await group.next()
+            group.cancelAll()
         }
     }
 
@@ -475,8 +485,9 @@ final class AppModel: ObservableObject {
             speech.requestStop(); playSound("finish")
         }
         guard speech.phase == .finishing else { return }
-        // Context gathering is bounded (~0.3 s) and normally finished long before stop.
-        await contextTask?.value
+        // Context gathering is bounded and normally finished long before stop;
+        // never let a slow app hold up the final text by more than a moment.
+        if let contextTask { await Self.wait(for: contextTask, upTo: .milliseconds(400)) }
         onRecordingChanged?(false)
         checkpointTimer?.invalidate(); checkpointTimer = nil
         let id = activeID
@@ -487,13 +498,12 @@ final class AppModel: ObservableObject {
             let polishStart = ProcessInfo.processInfo.systemUptime
             let polished = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier, applyStyles: editSelection == nil)
             var text = polished.text
-            var details = DictationDetails(contextWords: speech.contextTerms, boostedWords: speech.boostedWords, steps: polished.steps,
+            var details = DictationDetails(contextWords: Array(speech.contextTerms.prefix(40)), boostedWords: speech.boostedWords, steps: polished.steps,
                                            transcribeSeconds: transcribeSeconds)
             guard activeID == id, !Task.isCancelled else { return }
             var editFailed = false
             if let selection = editSelection, !text.isEmpty {
                 editSelection = nil
-            details.polishSeconds = ProcessInfo.processInfo.systemUptime - polishStart
                 hudWorking = "Rewriting…"
                 defer { hudWorking = nil }
                 do { text = try await LocalModel.edit(selection, instruction: text); details.steps.append("Apple Intelligence edited your selection") }
@@ -504,6 +514,7 @@ final class AppModel: ObservableObject {
                 guard activeID == id, !Task.isCancelled else { return }
             }
             editSelection = nil
+            details.polishSeconds = ProcessInfo.processInfo.systemUptime - polishStart
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
@@ -592,6 +603,7 @@ final class AppModel: ObservableObject {
 
     func edit(_ id: UUID, text: String) {
         guard requireWritableLibrary(), let i = index(id), id != activeID, transcripts[i].deletedAt == nil else { return }
+        if transcripts[i].editedFrom == nil { transcripts[i].editedFrom = transcripts[i].text }
         transcripts[i].text = text
         editSaveTask?.cancel()
         editSaveTask = Task { [weak self] in

@@ -44,10 +44,20 @@ enum ContextVocabulary {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.1)
         guard let window = element(app, kAXFocusedWindowAttribute) else { return nil }
+        AXUIElementSetMessagingTimeout(window, 0.1)
         let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser.standardizedFileURL.path
+        // Folders macOS guards with a permission prompt are never probed, and a
+        // dotfiles repo in your home folder isn't a project.
+        let protected = ["Documents", "Desktop", "Downloads", "Library", "Pictures", "Movies", "Music"].map { home + "/" + $0 }
+        func allowed(_ url: URL) -> Bool {
+            let path = url.standardizedFileURL.path
+            return path.hasPrefix(home + "/") && !protected.contains { path == $0 || path.hasPrefix($0 + "/") }
+        }
         func gitRoot(from start: URL) -> URL? {
             var url = start
             for _ in 0..<8 {
+                guard allowed(url) else { return nil }
                 if fileManager.fileExists(atPath: url.appendingPathComponent(".git").path) { return url }
                 let parent = url.deletingLastPathComponent()
                 if parent.path == url.path || parent.path == "/" { return nil }
@@ -58,15 +68,15 @@ enum ContextVocabulary {
         if let document = string(window, kAXDocumentAttribute), let url = URL(string: document), url.isFileURL,
            let root = gitRoot(from: url) { return root }
         guard let title = string(window, kAXTitleAttribute) else { return nil }
-        let home = fileManager.homeDirectoryForCurrentUser
-        let parents = ["", "Developer", "Projects", "projects", "code", "Code", "src", "dev", "GitHub", "Documents/GitHub"]
-            .map { $0.isEmpty ? home : home.appendingPathComponent($0) }
+        let homeURL = fileManager.homeDirectoryForCurrentUser
+        let parents = ["", "Developer", "Projects", "projects", "code", "Code", "src", "dev", "GitHub"]
+            .map { $0.isEmpty ? homeURL : homeURL.appendingPathComponent($0) }
         for part in title.components(separatedBy: CharacterSet(charactersIn: "—–|")).map({ $0.trimmingCharacters(in: .whitespaces) }) {
             if part.hasPrefix("~/") || part.hasPrefix("/") {
                 let url = URL(fileURLWithPath: (part as NSString).expandingTildeInPath)
                 if let root = gitRoot(from: url) { return root }
             }
-            guard !part.isEmpty, part.count <= 60, !part.contains("/") else { continue }
+            guard !part.isEmpty, part.count <= 60, !part.contains("/"), !part.hasPrefix(".") else { continue }
             for parent in parents where fileManager.fileExists(atPath: parent.appendingPathComponent(part).appendingPathComponent(".git").path) {
                 return parent.appendingPathComponent(part)
             }
@@ -141,9 +151,10 @@ enum ContextVocabulary {
         while !queue.isEmpty, visited < maxElements, characters < maxCharacters,
               ProcessInfo.processInfo.systemUptime < deadline {
             let current = queue.removeFirst()
+            AXUIElementSetMessagingTimeout(current, 0.05)
             visited += 1
-            let role = string(current, kAXRoleAttribute) ?? ""
-            if role == "AXSecureTextField" { continue }
+            // Password fields report their kind in the subrole, not the role.
+            if string(current, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String { continue }
             for attribute in [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute] {
                 guard let value = string(current, attribute), !value.isEmpty else { continue }
                 let piece = String(value.prefix(maxCharacters - characters))
@@ -203,22 +214,13 @@ enum ContextVocabulary {
         return first.isUppercase || innerCapital || hasDigit
     }
 
-    /// Words you added when correcting a transcript, e.g. "recaller" → "Recallr".
+    /// Words you fixed when editing a transcript, e.g. "recaller" → "Recallr".
+    /// Only small word swaps count; added or rewritten sentences don't.
     nonisolated static func learnedWords(from edits: [(original: String, corrected: String)]) -> [String] {
         var seen = Set<String>(), result: [String] = []
         for edit in edits {
-            let before = Set(words(edit.original).map { $0.lowercased() })
-            for word in words(edit.corrected) where word.count >= 3 && !before.contains(word.lowercased()) {
-                if seen.insert(word.lowercased()).inserted { result.append(word) }
-            }
-        }
-        return result
-    }
-
-    private nonisolated static func words(_ text: String) -> [String] {
-        var result: [String] = []
-        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, _, _, _ in
-            if let word { result.append(word) }
+            for pair in CorrectionLearner.pairs(original: edit.original, edited: edit.corrected)
+            where seen.insert(pair.desired.lowercased()).inserted { result.append(pair.desired) }
         }
         return result
     }

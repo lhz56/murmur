@@ -354,6 +354,8 @@ final class FnShortcut {
         let finishHold = state.isDown && !state.isChord && state.behavior == .hold && (state.didTrigger || state.wasBusy)
         let heldKey = state.isDown ? installedKey ?? trigger() : releaseRequiredFor
         resetInput()
+        // A mouse release can be lost while the hook restarts; finish the hold.
+        if mouseDown { mouseDown = false; onMouse?(false) }
         releaseRequiredFor = heldKey
         if finishHold { onAction?(.finishHold) }
     }
@@ -365,7 +367,6 @@ final class FnShortcut {
 
     func stop() {
         abandonHeldInput()
-        if mouseDown { mouseDown = false; onMouse?(false) }
         installedMouse = 0
         controlTimer?.invalidate(); controlTimer = nil; controlPolling = .off
         installedKey = nil

@@ -5,11 +5,12 @@ import Contacts
 /// System Settings–style preferences: a category sidebar and native grouped forms.
 struct SettingsView: View {
     enum Pane: String, CaseIterable, Identifiable {
-        case shortcut = "Shortcut", microphone = "Microphone", transcription = "Transcription"
+        case general = "General", shortcut = "Shortcut", microphone = "Microphone", transcription = "Transcription"
         case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary", snippets = "Snippets", styles = "Styles"
         var id: Self { self }
         var symbol: String {
             switch self {
+            case .general: return "gearshape"
             case .shortcut: return "keyboard"
             case .microphone: return "mic"
             case .transcription: return "waveform"
@@ -33,7 +34,7 @@ struct SettingsView: View {
     @StateObject private var login = LaunchAtLogin()
     @ObservedObject private var updates: UpdateChecker
 
-    init(model: AppModel, preferences: Preferences, speech: DictationEngine, microphoneCheck: MicrophoneCheck, initialPane: Pane = .shortcut) {
+    init(model: AppModel, preferences: Preferences, speech: DictationEngine, microphoneCheck: MicrophoneCheck, initialPane: Pane = .general) {
         self.model = model; self.preferences = preferences; self.speech = speech; self.microphoneCheck = microphoneCheck
         self.updates = model.updates
         _pane = State(initialValue: initialPane)
@@ -87,6 +88,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var content: some View {
         switch pane {
+        case .general: generalPane
         case .shortcut: shortcutPane
         case .microphone: microphonePane
         case .transcription: transcriptionPane
@@ -105,6 +107,52 @@ struct SettingsView: View {
         let key = preferences.dictationKey.name
         if preferences.fnBehavior == .hold { return "Hold \(key) to record, then release to finish. Short taps are ignored." }
         return "Tap \(key) to record. Tap again to finish."
+    }
+
+    @ViewBuilder private var generalPane: some View {
+        Section {
+            Toggle(isOn: $preferences.checkForUpdates) {
+                Text("Check for updates")
+                Text("Once a day, ask GitHub if a newer Murmur is out. Nothing about you is sent.")
+            }
+            .onChange(of: preferences.checkForUpdates) { _, on in if on { Task { await updates.check(force: true) } } }
+            if preferences.checkForUpdates {
+                LabeledContent {
+                    if let update = updates.available {
+                        Button("Get \(update.version)…") { NSWorkspace.shared.open(update.url) }
+                    } else {
+                        Button(updates.checking ? "Checking…" : "Check now") { Task { await updates.check(force: true) } }.disabled(updates.checking)
+                    }
+                } label: {
+                    Text("Murmur \(updates.currentVersion)")
+                    Text(updates.available != nil ? "A new version is available." : updates.lastError ?? "You’re up to date.")
+                }
+            }
+        }
+        Section {
+            Toggle(isOn: Binding(get: { login.isEnabled }, set: { login.set($0) })) {
+                Text("Open at login")
+                Text("Start Murmur quietly in the menu bar when you log in, so the shortcut always works.")
+            }
+            if login.needsApproval {
+                LabeledContent("Waiting for approval in System Settings") {
+                    Button("Open Login Items…") { login.openSystemSettings() }
+                }
+            }
+            if let error = login.error { Text(error).foregroundStyle(Palette.red) }
+        }
+        Section {
+            LabeledContent {
+                Button("Open Welcome Guide") {
+                    dismiss()
+                    // Let Settings finish closing before the guide's sheet opens.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.showOnboarding = true }
+                }
+            } label: {
+                Text("Welcome guide")
+                Text("Permissions, your dictation key, and a quick try-it.")
+            }
+        }
     }
 
     @ViewBuilder private var shortcutPane: some View {
@@ -174,37 +222,6 @@ struct SettingsView: View {
             }
             LabeledContent("Stop and keep a recording") { ShortcutKeys(keys: ["Esc"]) }
         } header: { Text("Always available") }
-        Section {
-            Toggle(isOn: $preferences.checkForUpdates) {
-                Text("Check for updates")
-                Text("Once a day, ask GitHub if a newer Murmur is out. Nothing about you is sent.")
-            }
-            .onChange(of: preferences.checkForUpdates) { _, on in if on { Task { await updates.check(force: true) } } }
-            if preferences.checkForUpdates {
-                LabeledContent {
-                    if let update = updates.available {
-                        Button("Get \(update.version)…") { NSWorkspace.shared.open(update.url) }
-                    } else {
-                        Button(updates.checking ? "Checking…" : "Check now") { Task { await updates.check(force: true) } }.disabled(updates.checking)
-                    }
-                } label: {
-                    Text("Murmur \(updates.currentVersion)")
-                    Text(updates.available != nil ? "A new version is available." : updates.lastError ?? "You’re up to date.")
-                }
-            }
-        }
-        Section {
-            Toggle(isOn: Binding(get: { login.isEnabled }, set: { login.set($0) })) {
-                Text("Open at login")
-                Text("Start Murmur quietly in the menu bar when you log in, so the shortcut always works.")
-            }
-            if login.needsApproval {
-                LabeledContent("Waiting for approval in System Settings") {
-                    Button("Open Login Items…") { login.openSystemSettings() }
-                }
-            }
-            if let error = login.error { Text(error).foregroundStyle(Palette.red) }
-        }
     }
 
     @ViewBuilder private var microphonePane: some View {
@@ -492,7 +509,7 @@ struct SettingsView: View {
         Section {
             Toggle(isOn: $preferences.contextWords) {
                 Text("Learn words from your screen")
-                Text("While you dictate, Murmur listens for names and unusual words shown in the app you’re using and in the project you’re working on, and words you’ve corrected before. It stays on this Mac and nothing is saved.")
+                Text("While you dictate, Murmur listens for names and unusual words shown in the app you’re using and in the project you’re working on, and words you’ve corrected before. The words it picked are listed on each transcript. Nothing leaves this Mac.")
             }
             Toggle(isOn: $preferences.learnFromEdits) {
                 Text("Learn from your fixes")

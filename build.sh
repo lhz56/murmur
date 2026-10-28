@@ -61,6 +61,7 @@ done
 if [[ -f "$PROJECT_DIR/Resources/THIRD-PARTY.txt" ]]; then
   cp "$PROJECT_DIR/Resources/THIRD-PARTY.txt" "$STAGED_APP/Contents/Resources/"
   cp "$PROJECT_DIR"/Resources/LICENSE-*.txt "$STAGED_APP/Contents/Resources/"
+  cp "$PROJECT_DIR/LICENSE" "$STAGED_APP/Contents/Resources/LICENSE.txt"
 fi
 "$PROJECT_DIR/Tools/SignApp.sh" "$STAGED_APP"
 

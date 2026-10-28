@@ -39,10 +39,10 @@ import Foundation
         assert(P.styled("Really?", for: .code) == "Really?")
 
         // Snippets
-        let snippets = [P.Snippet(trigger: "my email", text: "lin@recallr.ai"), P.Snippet(trigger: "calendar link", text: "cal.com/lin")]
-        assert(P.expandingSnippets("Insert my email.", snippets: snippets) == "lin@recallr.ai")
-        assert(P.expandingSnippets("My email", snippets: snippets) == "lin@recallr.ai")
-        assert(P.expandingSnippets("Book a time here: insert calendar link.", snippets: snippets) == "Book a time here: cal.com/lin.")
+        let snippets = [P.Snippet(trigger: "my email", text: "lin@example.com"), P.Snippet(trigger: "calendar link", text: "example.com/lin")]
+        assert(P.expandingSnippets("Insert my email.", snippets: snippets) == "lin@example.com")
+        assert(P.expandingSnippets("My email", snippets: snippets) == "lin@example.com")
+        assert(P.expandingSnippets("Book a time here: insert calendar link.", snippets: snippets) == "Book a time here: example.com/lin.")
         assert(P.expandingSnippets("I lost my email password.", snippets: snippets) == "I lost my email password.")
         print("PASS: scratch that, correction cues, addresses, numbered lists, per-app style, and voice snippets")
     }

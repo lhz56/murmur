@@ -18,6 +18,8 @@ struct Transcript: Identifiable, Codable, Equatable {
     var microphoneName: String?
     var confidence: Float?
     var reviewReason: String?
+    /// The text before your first edit in the library; your edits teach Murmur words.
+    var editedFrom: String?
     /// What happened to this dictation, shown under "What Murmur did".
     var details: DictationDetails?
 

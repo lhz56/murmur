@@ -25,6 +25,8 @@ import Foundation
         let learned = ContextVocabulary.learnedWords(from: [("I'm working on recaller today", "I'm working on Recallr today"),
                                                             ("same text", "same text")])
         assert(learned == ["Recallr"], "\(learned)")
+        // Adding a sentence teaches nothing; only word swaps count.
+        assert(ContextVocabulary.learnedWords(from: [("We ship Friday.", "We ship Friday. The whole team will meet after.")]).isEmpty)
         let project = ContextVocabulary.projectWords(URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "."))
         assert(project.contains("ContextVocabulary") && project.contains("FluidAudio"), "\(project.prefix(20))")
         let withExtra = ContextVocabulary.rank(names: [], words: [:], learned: [], extra: ["Nkechi Okafor", "John Smith"],
