@@ -53,7 +53,7 @@ struct RecorderHUD: View {
     }
 
     private var title: String {
-        model.hudMessage ?? (listening ? "Listening" : speech.phase == .idle ? "Getting ready…" : speech.phase.label)
+        model.hudMessage ?? model.hudWorking ?? (listening ? "Listening" : speech.phase == .idle ? "Getting ready…" : speech.phase.label)
     }
 
     private var subtitle: String {

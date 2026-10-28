@@ -495,6 +495,12 @@ struct PasteboardSnapshot {
         return result
     }
 
+    /// The text currently selected in the destination editor, if any.
+    func selectedText(in destination: Destination?) -> String? {
+        guard let element = destination?.element else { return nil }
+        return stringAttribute(element, kAXSelectedTextAttribute)
+    }
+
     /// The character just before the caret in the destination editor, read as a
     /// one-character range so large documents are never copied across processes.
     func characterBeforeCaret(in destination: Destination?) -> Character? {

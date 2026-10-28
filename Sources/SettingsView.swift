@@ -146,6 +146,12 @@ struct SettingsView: View {
         Section {
             LabeledContent("Start or finish") { ShortcutKeys() }
             LabeledContent("Paste last transcript") { ShortcutKeys(keys: ["⌃", "⌥", "V"]) }
+            LabeledContent {
+                ShortcutKeys(keys: ["⌃", "⌥", "E"])
+            } label: {
+                Text("Edit selection by voice")
+                Text(LocalModel.unavailableReason ?? "Select text, press, say “make this shorter”, press again.")
+            }
             LabeledContent("Stop and keep a recording") { ShortcutKeys(keys: ["Esc"]) }
         } header: { Text("Always available") }
         Section {

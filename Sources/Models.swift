@@ -225,3 +225,45 @@ enum TextTools {
         return " " + text
     }
 }
+
+/// Library search that understands questions: "what did I say about pricing"
+/// looks for notes mentioning price/pricing. Words are matched by stem, so
+/// "launches" finds "launch", and all content words must appear.
+enum LibrarySearch {
+    private static let stopwords: Set<String> = [
+        "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "for", "with", "about", "from", "by", "as",
+        "is", "are", "was", "were", "be", "been", "do", "did", "does", "i", "me", "my", "we", "our", "you", "your", "it",
+        "what", "when", "where", "who", "why", "how", "which", "that", "this", "these", "those", "say", "said", "tell",
+        "talk", "talked", "mention", "mentioned", "any", "anything", "something", "there", "have", "has", "had", "can",
+        "could", "would", "should", "will", "find", "show", "notes", "note", "last", "ago",
+    ]
+
+    /// Stemmed content words; a plain one-word search is kept as typed.
+    static func terms(_ query: String) -> [String] {
+        let words = query.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        let content = words.filter { !stopwords.contains($0) }
+        return (content.isEmpty ? words : content).map(stem)
+    }
+
+    static func stem(_ word: String) -> String {
+        guard word.count > 4 else { return word }
+        for suffix in ["ings", "ing", "ies", "ied", "es", "ed", "s"] where word.hasSuffix(suffix) && word.count - suffix.count >= 3 {
+            var base = String(word.dropLast(suffix.count))
+            if suffix == "ies" || suffix == "ied" { base += "y" }
+            // "pricing" → "pric", which still finds "price" and "priced".
+            return base.count > 4 && base.hasSuffix("e") ? String(base.dropLast()) : base
+        }
+        return word
+    }
+
+    static func matches(_ text: String, terms: [String]) -> Bool {
+        guard !terms.isEmpty else { return true }
+        return terms.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    /// True when the search reads like a question for Ask.
+    static func isQuestion(_ query: String) -> Bool {
+        let lower = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return lower.hasSuffix("?") || ["what ", "when ", "where ", "who ", "why ", "how ", "did ", "do ", "which "].contains(where: lower.hasPrefix)
+    }
+}

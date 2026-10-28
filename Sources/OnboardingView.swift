@@ -57,7 +57,7 @@ struct OnboardingView: View {
                     .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
             }.padding(.horizontal, 24).frame(height: 60)
         }
-        .frame(width: 560, height: 470)
+        .frame(width: 560, height: 510)
         .background(Palette.canvas)
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
@@ -182,6 +182,8 @@ struct OnboardingView: View {
                 shortcutRow("Hands-free start / finish", ["⌃", "⌥", "Space"])
                 Hairline()
                 shortcutRow("Paste last transcript", ["⌃", "⌥", "V"])
+                Hairline()
+                shortcutRow("Edit selected text by voice", ["⌃", "⌥", "E"])
                 Hairline()
                 shortcutRow("Cancel", ["Esc"])
             }

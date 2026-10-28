@@ -63,6 +63,10 @@ struct MainView: View {
                 IconButton(symbol: "square.and.arrow.up", help: "Export library") { model.export() }
             }.padding(.leading, 16).padding(.trailing, 8).frame(height: 52)
             SearchField(text: $model.search, focused: $searchFocused).padding(.horizontal, 10).padding(.bottom, 6)
+                .onSubmit { if LibrarySearch.isQuestion(model.search), LocalModel.isAvailable { model.ask(model.search) } }
+            if LibrarySearch.isQuestion(model.search) || model.answer?.question == model.search {
+                AskPanel(model: model).padding(.horizontal, 10).padding(.bottom, 8)
+            }
             if visible.isEmpty {
                 EmptyList(searching: !model.search.isEmpty, filter: model.filter)
             } else {
@@ -339,6 +343,33 @@ struct SearchField: View {
             .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .strokeBorder(focused.wrappedValue ? Palette.accent.opacity(0.55) : .clear, lineWidth: 1.5))
             .onExitCommand { text = ""; focused.wrappedValue = false }
+    }
+}
+
+/// Ask your library a question; Apple's on-device model answers from your notes.
+struct AskPanel: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        if let answer = model.answer, answer.question == model.search {
+            Callout(symbol: "sparkles", tint: Palette.accent) {
+                Text(answer.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Button("Clear") { model.answer = nil }.buttonStyle(QuietButtonStyle()).padding(.leading, -8)
+            }
+        } else if let reason = LocalModel.unavailableReason {
+            Callout(symbol: "sparkles") { Text("Ask questions about your notes. \(reason)").foregroundStyle(Palette.muted) }
+        } else {
+            Button { model.ask(model.search) } label: {
+                HStack(spacing: 6) {
+                    if model.answering { ProgressView().controlSize(.small) } else { Image(systemName: "sparkles") }
+                    Text(model.answering ? "Thinking…" : "Ask your notes").lineLimit(1)
+                    Spacer()
+                    Text("↩").foregroundStyle(Palette.faint)
+                }.frame(maxWidth: .infinity)
+            }
+            .buttonStyle(QuietButtonStyle(tint: Palette.accent))
+            .background(Palette.wash, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .disabled(model.answering)
+        }
     }
 }
 

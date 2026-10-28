@@ -9,10 +9,12 @@ final class GlobalShortcut {
     private var hotKey: EventHotKeyRef?
     private var escapeKey: EventHotKeyRef?
     private var pasteKey: EventHotKeyRef?
+    private var editKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     var onToggle: (() -> Void)?
     var onEscape: (() -> Void)?
     var onPasteLast: (() -> Void)?
+    var onEdit: (() -> Void)?
 
     func register() -> OSStatus {
         var specification = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -25,10 +27,13 @@ final class GlobalShortcut {
             if identifier.id == 1 { shortcut.onToggle?() }
             if identifier.id == 2 { shortcut.onEscape?() }
             if identifier.id == 3 { shortcut.onPasteLast?() }
+            if identifier.id == 4 { shortcut.onEdit?() }
             return noErr
         }, 1, &specification, Unmanaged.passUnretained(self).toOpaque(), &handler)
         // Paste Last Transcript (Control-Option-V) is optional; a conflict leaves it unregistered.
         RegisterEventHotKey(9, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 3), GetApplicationEventTarget(), 0, &pasteKey)
+        // Edit Selection by Voice (Control-Option-E) is optional too.
+        RegisterEventHotKey(14, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 4), GetApplicationEventTarget(), 0, &editKey)
         return RegisterEventHotKey(49, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 1), GetApplicationEventTarget(), 0, &hotKey)
     }
 
@@ -43,6 +48,7 @@ final class GlobalShortcut {
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let escapeKey { UnregisterEventHotKey(escapeKey) }
         if let pasteKey { UnregisterEventHotKey(pasteKey) }
+        if let editKey { UnregisterEventHotKey(editKey) }
         if let handler { RemoveEventHandler(handler) }
     }
 }
@@ -91,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         shortcut.onToggle = { [weak self] in self?.model.toggleRecording() }
         shortcut.onEscape = { [weak self] in self?.model.cancelRecording() }
         shortcut.onPasteLast = { [weak self] in self?.model.pasteLastTranscript() }
+        shortcut.onEdit = { [weak self] in self?.model.toggleEditRecording() }
         fnShortcut.behavior = { [weak self] in self?.model.preferences.fnBehavior ?? .hold }
         fnShortcut.trigger = { [weak self] in self?.model.preferences.dictationKey ?? .control }
         fnShortcut.enabled = { [weak self] in
@@ -239,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let copy = item("Copy Last Transcript", last == nil ? nil : #selector(copyLastTranscript))
         copy.toolTip = last?.title
         _ = item("Paste Last Transcript", last == nil || busy ? nil : #selector(pasteLastTranscript), key: "v", modifiers: [.control, .option])
+        _ = item("Edit Selection by Voice", busy ? nil : #selector(editSelectionByVoice), key: "e", modifiers: [.control, .option])
         menu.addItem(.separator())
         _ = item("Open Library", #selector(openLibrary))
         _ = item("Settings…", #selector(openSettings))
@@ -292,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func pasteLastTranscript() { model.pasteLastTranscript() }
     @objc private func importAudio() { openLibrary(); model.importAudio() }
     @objc private func focusSearch() { openLibrary(); NotificationCenter.default.post(name: .murmurSearch, object: nil) }
+    @objc private func editSelectionByVoice() { model.toggleEditRecording() }
     @objc private func showWelcome() { openLibrary(); model.showSettings = false; model.showOnboarding = true }
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Murmur", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0", .credits: NSAttributedString(string: "A little less typing. A lot more you.\nNative dictation. On-device speech. Your own library.")])

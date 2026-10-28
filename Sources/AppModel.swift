@@ -76,6 +76,13 @@ final class AppModel: ObservableObject {
     @Published var activeID: UUID?
     @Published var showSettings = false
     @Published var showOnboarding = false
+    /// Answer from Ask, shown above the list while the question is unchanged.
+    @Published var answer: (question: String, text: String)?
+    @Published var answering = false
+    /// Shown in the recording pill while the on-device model works.
+    @Published var hudWorking: String?
+    /// Text selected when an edit-by-voice recording started.
+    private var editSelection: String?
     private var contextTask: Task<Void, Never>?
     @Published var errorMessage: String?
     @Published var toast: String?
@@ -170,14 +177,16 @@ final class AppModel: ObservableObject {
     }
 
     var visibleTranscripts: [Transcript] {
-        transcripts.filter { entry in
+        let terms = LibrarySearch.terms(search)
+        return transcripts.filter { entry in
             let allowed: Bool
             switch filter {
             case .all: allowed = entry.deletedAt == nil
             case .favorites: allowed = entry.deletedAt == nil && entry.isFavorite
             case .trash: allowed = entry.deletedAt != nil
             }
-            return allowed && (search.isEmpty || entry.text.localizedCaseInsensitiveContains(search) || entry.sourceApp.localizedCaseInsensitiveContains(search))
+            return allowed && (search.isEmpty || LibrarySearch.matches(entry.text, terms: terms)
+                               || entry.sourceApp.localizedCaseInsensitiveContains(search))
         }
     }
     var savedTranscripts: [Transcript] { transcripts.filter { $0.deletedAt == nil && $0.status != .recording } }
@@ -318,6 +327,7 @@ final class AppModel: ObservableObject {
     }
 
     private func cancelRecordingStartup() {
+        editSelection = nil
         guard startingID != nil || (speech.phase == .idle && activeID == nil) else { return }
         recordingTask?.cancel()
         guard let id = startingID, activeID == id else { return }
@@ -350,6 +360,37 @@ final class AppModel: ObservableObject {
     private func checkpoint() {
         updateActive(text: speech.liveText, duration: speech.elapsed)
         persist()
+    }
+
+    /// Answers a question from the user's own notes with the on-device model,
+    /// using matching notes, or the most recent ones when nothing matches.
+    func ask(_ question: String) {
+        guard !answering else { return }
+        let matches = visibleTranscripts.filter { !$0.text.isEmpty }
+        let pool = (matches.isEmpty ? savedTranscripts.filter { !$0.text.isEmpty } : matches).prefix(12)
+        answering = true
+        Task {
+            defer { answering = false }
+            do {
+                let text = try await LocalModel.answer(question, from: pool.map { (date: $0.createdAt, text: $0.text) })
+                answer = (question, text)
+            } catch { answer = (question, error.localizedDescription) }
+        }
+    }
+
+    /// Edit by voice: select text in any app, press Control-Option-E, say what
+    /// to change ("make this friendlier"), and press it again.
+    func toggleEditRecording() {
+        guard !isTestingFn else { return }
+        if speech.phase == .recording || startingID != nil { toggleRecording(); return }
+        guard speech.phase == .idle, activeID == nil else { return }
+        if let reason = LocalModel.unavailableReason { flashHUD("Edit by voice needs Apple Intelligence", detail: reason); return }
+        let destination = textInsertion.captureDestination()
+        guard let selection = textInsertion.selectedText(in: destination), !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            flashHUD("Select some text first", detail: "Then press ⌃⌥E and say how to change it"); return
+        }
+        editSelection = selection
+        toggleRecording()
     }
 
     /// Turns raw recognizer output into finished text: fillers, replacements and
@@ -403,8 +444,21 @@ final class AppModel: ObservableObject {
         do {
             let original = try await speech.stop()
             guard activeID == id, !Task.isCancelled else { return }
-            let text = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
+            var text = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
             guard activeID == id, !Task.isCancelled else { return }
+            var editFailed = false
+            if let selection = editSelection, !text.isEmpty {
+                editSelection = nil
+                hudWorking = "Rewriting…"
+                defer { hudWorking = nil }
+                do { text = try await LocalModel.edit(selection, instruction: text) }
+                catch {
+                    errorMessage = "Your instruction was saved, but the edit didn’t finish. \(error.localizedDescription)"
+                    editFailed = true
+                }
+                guard activeID == id, !Task.isCancelled else { return }
+            }
+            editSelection = nil
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
@@ -414,7 +468,7 @@ final class AppModel: ObservableObject {
             }
             // Deliver immediately when final text exists; history writes and audio
             // retention cleanup should never stand between stop and the clipboard.
-            if review == nil, !text.isEmpty { await deliver(text) }
+            if review == nil, !text.isEmpty, !editFailed { await deliver(text) }
             guard activeID == id, !Task.isCancelled else { return }
             if let requestedAt = stopRequestedAt {
                 timingLog.info("Final text ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms; clipboard enabled: \(self.preferences.autoCopy, privacy: .public)")
@@ -460,6 +514,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancelRecording() {
+        editSelection = nil
         if startingID != nil { cancelRecordingStartup(); return }
         guard speech.phase == .recording else { return }
         speech.requestStop()
