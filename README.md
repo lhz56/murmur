@@ -16,6 +16,11 @@
   <img src="https://img.shields.io/badge/Apple%20silicon-required-black.svg" alt="Apple silicon">
 </p>
 
+<p align="center">
+  <img src="docs/demo.gif" width="720" alt="Holding Control in a note, saying a sentence, and Murmur inserting it with Recallr and Nkechi spelled correctly">
+  <br><sub>Rendered from Murmur's real recording pill with <code>Tools/RenderDemo.sh</code>. The live preview hears "recaller"; the final text uses the spelling on screen.</sub>
+</p>
+
 ---
 
 Hold **Control** in any app, say what you mean, and let go. Murmur turns your voice into clean text where you were typing, a fraction of a second after you let go, without anything leaving your Mac.

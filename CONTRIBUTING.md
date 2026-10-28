@@ -12,6 +12,8 @@ git clone https://github.com/lhz56/murmur.git && cd murmur
 ./test.sh           # runs every test suite
 ```
 
+`Tools/GenerateIcon.swift` draws the app icon, and `Tools/RenderDemo.sh` re-renders `docs/demo.gif` after interface changes (needs ffmpeg).
+
 During development, `./build.sh` rebuilds `Murmur.app` in place (quit Murmur first), and `open Murmur.app` runs it.
 
 ## Where things live

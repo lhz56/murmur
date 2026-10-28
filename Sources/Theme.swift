@@ -131,18 +131,23 @@ struct ShortcutKeys: View {
     }
 }
 
-/// Murmur's mark, matching the app icon: a waveform that ends in a text cursor.
+/// Murmur's mark, matching the app icon: a white glass waveform ending in a
+/// text cursor, on a black glass tile.
 struct WaveMark: View {
     var size: CGFloat = 32
     var body: some View {
         HStack(spacing: size * 0.05) {
             ForEach(0..<4) { index in
-                Capsule().fill(Color.white).frame(width: size * 0.078, height: size * [0.21, 0.40, 0.57, 0.35][index])
+                Capsule().fill(LinearGradient(colors: [.white, Color(white: 0.78)], startPoint: .top, endPoint: .bottom))
+                    .frame(width: size * 0.078, height: size * [0.21, 0.40, 0.57, 0.35][index])
             }
-            Capsule().fill(Color(hex: 0x3291EF)).frame(width: size * 0.042, height: size * 0.63).padding(.leading, size * 0.03)
+            Capsule().fill(Color.white).frame(width: size * 0.042, height: size * 0.63).padding(.leading, size * 0.03)
         }.frame(width: size, height: size)
-            .background(LinearGradient(colors: [Color(hex: 0x3A3A3D), Color(hex: 0x18181A)], startPoint: .top, endPoint: .bottom),
+            .background(LinearGradient(colors: [Color(white: 0.22), Color(white: 0.03)], startPoint: .top, endPoint: .bottom),
                         in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                .strokeBorder(LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0.06)], startPoint: .top, endPoint: .bottom),
+                              lineWidth: max(0.5, size * 0.02)))
             .accessibilityHidden(true)
     }
 }
