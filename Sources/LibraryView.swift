@@ -36,6 +36,7 @@ struct MainView: View {
         .sheet(isPresented: $model.showSettings) {
             SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck)
         }
+        .sheet(isPresented: $model.showStats) { StatsView(model: model, preferences: model.preferences) }
         .sheet(isPresented: $model.showOnboarding) {
             OnboardingView(model: model, preferences: model.preferences, speech: model.speech)
         }
@@ -214,6 +215,7 @@ struct SidebarView: View {
             Spacer(minLength: 16)
             RecordingDock(model: model, speech: speech).padding(.bottom, 8)
             Hairline().padding(.horizontal, 6).padding(.bottom, 6)
+            SidebarItem(title: "Insights", symbol: "chart.bar") { model.showStats = true }
             SidebarItem(title: "Settings", symbol: "gearshape", badge: "⌘,") { model.showSettings = true }
         }.padding(.horizontal, 8).padding(.bottom, 10)
             .frame(maxHeight: .infinity, alignment: .top)

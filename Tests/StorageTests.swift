@@ -68,6 +68,19 @@ import Foundation
         assert(TextTools.clean("Buy milk new line eggs new line", voiceCommands: true) == "Buy milk\nEggs\n")
         assert(TextTools.clean("A brand new liner arrived.", voiceCommands: true) == "A brand new liner arrived.")
         assert(TextTools.clean("Buy milk new line eggs") == "Buy milk new line eggs")
+        do {
+            let now = Date()
+            var a = Transcript(); a.status = .complete; a.text = Array(repeating: "word", count: 120).joined(separator: " "); a.duration = 60; a.createdAt = now
+            var b = a; b.id = UUID(); b.createdAt = now.addingTimeInterval(-10 * 86_400)
+            var trashed = a; trashed.id = UUID(); trashed.deletedAt = now
+            var failed = a; failed.id = UUID(); failed.status = .failed
+            let stats = LibraryStats([a, b, trashed, failed], typingSpeed: 40, now: now)
+            assert(stats.totalWords == 240 && stats.weekWords == 120 && stats.dictations == 2)
+            assert(stats.speakingPace == 120)
+            assert(stats.minutesSaved == 4) // 240 words typed at 40 wpm = 6 min, spoken in 2 min.
+            assert(stats.days.count == 14 && stats.days.last?.words == 120 && stats.days.reduce(0) { $0 + $1.words } == 240)
+            assert(LibraryStats([], typingSpeed: 40, now: now).speakingPace == nil)
+        }
         let applied = TextTools.appliedReplacements(in: "ask mer mer about fig ma", replacements: "mer mer => Murmur\nfig ma => Figma\nzzz => Q")
         assert(applied.map(\.desired) == ["Murmur", "Figma"])
         assert(LibrarySearch.terms("what did I say about pricing?") == ["pric"])

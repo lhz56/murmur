@@ -291,3 +291,40 @@ enum LibrarySearch {
         return lower.hasSuffix("?") || ["what ", "when ", "where ", "who ", "why ", "how ", "did ", "do ", "which "].contains(where: lower.hasPrefix)
     }
 }
+
+/// Totals for the Insights sheet, computed from finished transcripts.
+struct LibraryStats: Equatable {
+    struct Day: Equatable, Identifiable { let date: Date; let words: Int; var id: Date { date } }
+    var totalWords = 0
+    var weekWords = 0
+    var dictations = 0
+    /// Words per minute while speaking, from recordings longer than a few seconds.
+    var speakingPace: Int?
+    /// Minutes saved versus typing the same words at `typingSpeed`.
+    var minutesSaved = 0
+    var days: [Day] = []
+
+    init(_ transcripts: [Transcript], typingSpeed: Int, now: Date = Date(), calendar: Calendar = .current, dayCount: Int = 14) {
+        let finished = transcripts.filter { $0.deletedAt == nil && $0.status == .complete && !$0.text.isEmpty }
+        let today = calendar.startOfDay(for: now)
+        let weekStart = calendar.date(byAdding: .day, value: -6, to: today)!
+        var byDay: [Date: Int] = [:]
+        var paceWords = 0, paceSeconds = 0.0, spokenSeconds = 0.0
+        for entry in finished {
+            let words = entry.wordCount
+            totalWords += words
+            dictations += 1
+            spokenSeconds += entry.duration
+            if entry.createdAt >= weekStart { weekWords += words }
+            byDay[calendar.startOfDay(for: entry.createdAt), default: 0] += words
+            if entry.duration >= 3 { paceWords += words; paceSeconds += entry.duration }
+        }
+        if paceSeconds >= 10 { speakingPace = Int((Double(paceWords) / (paceSeconds / 60)).rounded()) }
+        let typingMinutes = Double(totalWords) / Double(max(typingSpeed, 1))
+        minutesSaved = max(0, Int((typingMinutes - spokenSeconds / 60).rounded()))
+        days = (0..<dayCount).reversed().map { offset in
+            let date = calendar.date(byAdding: .day, value: -offset, to: today)!
+            return Day(date: date, words: byDay[date] ?? 0)
+        }
+    }
+}
