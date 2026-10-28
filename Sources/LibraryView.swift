@@ -461,6 +461,7 @@ struct TranscriptPage: View {
     @ObservedObject var model: AppModel
     let entry: Transcript
     @State private var showOriginal = false
+    @State private var showDetails = false
     @State private var confirmDelete = false
     @State private var copied = false
 
@@ -482,6 +483,7 @@ struct TranscriptPage: View {
                     .font(.system(size: 30, weight: .bold)).tracking(-0.6).lineLimit(1)
                     .padding(.bottom, 16)
                 properties
+                if showDetails, let details = entry.details { DetailsPanel(details: details).padding(.top, 8) }
                 callouts
                 Hairline().padding(.vertical, 18)
                 editor.frame(minHeight: 120, maxHeight: .infinity)
@@ -544,6 +546,16 @@ struct TranscriptPage: View {
             property("Source", symbol: "macwindow") { Text(entry.sourceApp) }
             property("Words", symbol: "text.alignleft") { Text("\(entry.wordCount)").monospacedDigit() }
             if let engine = entry.engineName { property("Engine", symbol: "cpu") { Text(engine) } }
+            if let details = entry.details {
+                property("Processing", symbol: "wand.and.stars") {
+                    Button { withAnimation(.easeOut(duration: 0.15)) { showDetails.toggle() } } label: {
+                        HStack(spacing: 4) {
+                            Text(details.summary)
+                            Image(systemName: showDetails ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
+                        }
+                    }.buttonStyle(.plain).foregroundStyle(Palette.ink).help("What Murmur did")
+                }
+            }
             if entry.audioFile != nil {
                 property("Audio", symbol: "waveform") { player }
             } else {
@@ -630,6 +642,42 @@ struct TranscriptPage: View {
                     .buttonStyle(QuietButtonStyle())
             }
         }
+    }
+}
+
+/// "What Murmur did": context words, swapped-in words, cleanup steps, timings.
+struct DetailsPanel: View {
+    let details: DictationDetails
+    var body: some View {
+        Callout(symbol: "wand.and.stars") {
+            if let seconds = details.transcribeSeconds {
+                row("Timing", String(format: "Transcribed in %.2f s", seconds)
+                    + (details.polishSeconds.map { String(format: " · cleaned up in %.2f s", $0) } ?? ""))
+            }
+            if !details.boostedWords.isEmpty { row("Recognized", details.boostedWords.joined(separator: ", ")) }
+            row("Cleanup", details.steps.isEmpty ? "No changes" : details.steps.joined(separator: "\n"))
+            if let insertion = details.insertion { row("Insertion", insertion) }
+            if !details.contextWords.isEmpty {
+                row("Listened for", details.contextWords.prefix(40).joined(separator: ", ")
+                    + (details.contextWords.count > 40 ? " and \(details.contextWords.count - 40) more" : ""))
+            }
+        }
+    }
+    private func row(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.muted)
+            Text(value).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+extension DictationDetails {
+    var summary: String {
+        var parts: [String] = []
+        if !boostedWords.isEmpty { parts.append("\(boostedWords.count) word\(boostedWords.count == 1 ? "" : "s") recognized") }
+        if !steps.isEmpty { parts.append("\(steps.count) cleanup step\(steps.count == 1 ? "" : "s")") }
+        if parts.isEmpty, let seconds = transcribeSeconds { parts.append(String(format: "%.2f s", seconds)) }
+        return parts.isEmpty ? "Details" : parts.joined(separator: " · ")
     }
 }
 

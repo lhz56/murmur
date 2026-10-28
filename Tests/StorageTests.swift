@@ -68,6 +68,8 @@ import Foundation
         assert(TextTools.clean("Buy milk new line eggs new line", voiceCommands: true) == "Buy milk\nEggs\n")
         assert(TextTools.clean("A brand new liner arrived.", voiceCommands: true) == "A brand new liner arrived.")
         assert(TextTools.clean("Buy milk new line eggs") == "Buy milk new line eggs")
+        let applied = TextTools.appliedReplacements(in: "ask mer mer about fig ma", replacements: "mer mer => Murmur\nfig ma => Figma\nzzz => Q")
+        assert(applied.map(\.desired) == ["Murmur", "Figma"])
         assert(LibrarySearch.terms("what did I say about pricing?") == ["pric"])
         assert(LibrarySearch.matches("Users think the price is too high", terms: LibrarySearch.terms("what did I say about pricing")))
         assert(LibrarySearch.matches("We launched Recallr", terms: LibrarySearch.terms("Recallr launches")))

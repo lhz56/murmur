@@ -18,6 +18,8 @@ struct Transcript: Identifiable, Codable, Equatable {
     var microphoneName: String?
     var confidence: Float?
     var reviewReason: String?
+    /// What happened to this dictation, shown under "What Murmur did".
+    var details: DictationDetails?
 
     var wordCount: Int { text.split(whereSeparator: { $0.isWhitespace }).count }
     var title: String {
@@ -43,6 +45,18 @@ struct Transcript: Identifiable, Codable, Equatable {
                 trimmed[cut...].trimmingCharacters(in: .whitespacesAndNewlines), false)
     }
     var durationLabel: String { String(format: "%d:%02d", Int(duration) / 60, Int(duration) % 60) }
+}
+
+struct DictationDetails: Codable, Equatable {
+    /// Names and unusual words gathered from the screen, project, contacts and past fixes.
+    var contextWords: [String] = []
+    /// Words the recognizer swapped in because they were listened for.
+    var boostedWords: [String] = []
+    /// Cleanup steps that changed the text, in order.
+    var steps: [String] = []
+    var transcribeSeconds: Double?
+    var polishSeconds: Double?
+    var insertion: String?
 }
 
 struct HistoryDocument: Codable {
@@ -168,6 +182,16 @@ enum TextTools {
         }
         if voiceCommands { result = applyingVoiceCommands(result) }
         return result
+    }
+
+    /// The "heard => desired" pairs that matched somewhere in `text`.
+    static func appliedReplacements(in text: String, replacements: String) -> [(heard: String, desired: String)] {
+        replacements.components(separatedBy: .newlines).compactMap { line in
+            let pair = line.components(separatedBy: "=>").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard pair.count == 2, !pair[0].isEmpty, !pair[1].isEmpty else { return nil }
+            let pattern = "(?i)(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: pair[0]) + "(?![\\p{L}\\p{N}])"
+            return text.range(of: pattern, options: .regularExpression) != nil ? (pair[0], pair[1]) : nil
+        }
     }
 
     /// English hesitation sounds the recognizer writes out: um, uh, erm, hmm.

@@ -185,6 +185,10 @@ struct PasteboardSnapshot {
             log.info("Paste dispatched once pid=\(pid, privacy: .public) route=menu axError=\(error.rawValue, privacy: .public)")
         } else {
             guard postPasteShortcut(pid: pid) else {
+                // Nothing was sent yet, so typing can't double the text.
+                if await typeText(text, pid: pid) {
+                    return outcome(.inserted(destination.application.localizedName ?? "your app"), pid: pid, stage: "typedFallback", dispatched: true)
+                }
                 return outcome(.pasteUnavailable, pid: pid, stage: "eventCreation")
             }
             log.info("Paste dispatched once pid=\(pid, privacy: .public) route=keyboard")
@@ -387,6 +391,58 @@ struct PasteboardSnapshot {
             }
         }
         return nil
+    }
+
+    /// Types `text` into the focused app for apps that block pasting (remote
+    /// desktops, VMs, some web forms). Used for Type Last Transcript and when
+    /// a paste couldn't be sent at all; never after a paste was dispatched.
+    func type(_ text: String, into destination: Destination?) async -> InsertionResult {
+        let pid = destination?.application.processIdentifier ?? 0
+        guard AXIsProcessTrusted() else { return outcome(.permissionRequired, pid: pid, stage: "typePermission") }
+        guard let destination else { return outcome(.noTextField, pid: pid, stage: "typeDestination") }
+        guard !IsSecureEventInputEnabled() else { return outcome(.noTextField, pid: pid, stage: "typeSecureInput") }
+        let modifiers: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand, .maskShift, .maskSecondaryFn]
+        for _ in 0..<60 where !CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty {
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty else {
+            return outcome(.modifiersHeld, pid: pid, stage: "typeModifiers")
+        }
+        guard isStillFocused(destination) else { return outcome(.focusChanged, pid: pid, stage: "typeFocus") }
+        guard await typeText(text, pid: pid) else { return outcome(.focusChanged, pid: pid, stage: "typeInterrupted", dispatched: true) }
+        return outcome(.inserted(destination.application.localizedName ?? "your app"), pid: pid, stage: "typed", dispatched: true)
+    }
+
+    /// Posts the text as Unicode key events in small chunks. Line breaks are
+    /// Shift-Return, which adds a line in chat apps instead of sending.
+    private func typeText(_ text: String, pid: pid_t) async -> Bool {
+        guard let source = CGEventSource(stateID: .privateState) else { return false }
+        for (index, line) in text.components(separatedBy: "\n").enumerated() {
+            if index > 0 {
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return false }
+                for down in [true, false] {
+                    let event = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: down)
+                    event?.flags = .maskShift
+                    event?.post(tap: .cgSessionEventTap)
+                }
+            }
+            var units = Array(line.utf16)[...]
+            while !units.isEmpty {
+                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return false }
+                var count = min(16, units.count)
+                // Don't split a surrogate pair (emoji) across two events.
+                if count < units.count, UTF16.isLeadSurrogate(units[units.startIndex + count - 1]) { count -= 1 }
+                let chunk = Array(units.prefix(count)); units = units.dropFirst(count)
+                for down in [true, false] {
+                    guard let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { return false }
+                    event.flags = []
+                    event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+                    event.post(tap: .cgSessionEventTap)
+                }
+                try? await Task.sleep(for: .milliseconds(6))
+            }
+        }
+        return true
     }
 
     private func postPasteShortcut(pid: pid_t) -> Bool {

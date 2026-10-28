@@ -187,6 +187,14 @@ import Foundation
         print("PASS: custom editor eligibility requires writable text and excludes secure, disabled, and read-only controls")
         print("PASS: compatibility paste stays in the original app, window, and editor; named replacements require matching geometry")
         print("PASS: only enabled standard Command-V menu actions are eligible for a single paste attempt")
+        let element = AXUIElementCreateSystemWide()
+        let watched = TextInsertion.InsertedText(element: element, before: "Hi Sam. ", selection: NSRange(location: 8, length: 0), text: "recaller ships")!
+        assert(watched.current(in: "Hi Sam. Recallr ships") == "Recallr ships")
+        assert(watched.current(in: "") == nil) // Sent: the field was cleared.
+        assert(TextInsertion.InsertedText(element: element, before: nil, selection: NSRange(location: 0, length: 0), text: "x") == nil)
+        let middle = TextInsertion.InsertedText(element: element, before: "A  B", selection: NSRange(location: 2, length: 0), text: "x")!
+        assert(middle.current(in: "A yes B") == "yes" && middle.current(in: "Z yes B") == nil)
+        print("PASS: inserted text is found again between its original neighbors, and lost once the field changes around it")
         print("PASS: borrowed clipboard contents restore every item and type; oversized contents are skipped")
     }
 }

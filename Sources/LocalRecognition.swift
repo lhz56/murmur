@@ -11,7 +11,12 @@ enum RecognitionEngine: String, CaseIterable {
         }
     }
 }
-struct RecognitionResult { let text: String; let confidence: Float? }
+struct RecognitionResult {
+    let text: String
+    let confidence: Float?
+    /// Custom or context words Parakeet swapped in.
+    var vocabularyApplied: [String] = []
+}
 enum TranscriptionReview {
     static func reason(text: String, confidence: Float?, signal: InputSignal) -> String? {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -127,7 +132,10 @@ enum LocalSpeechError: LocalizedError {
                 // not terminate the shared worker or another pending request.
                 guard let continuation = waiting.removeValue(forKey: id) else { continue }
                 requestDeadlines.removeValue(forKey: id)?.cancel()
-                if type == "result" { continuation.resume(returning: RecognitionResult(text: message["text"] as? String ?? "", confidence: (message["confidence"] as? NSNumber)?.floatValue)) }
+                if type == "result" {
+                    continuation.resume(returning: RecognitionResult(text: message["text"] as? String ?? "", confidence: (message["confidence"] as? NSNumber)?.floatValue,
+                                                                     vocabularyApplied: message["vocabularyApplied"] as? [String] ?? []))
+                }
                 else { continuation.resume(throwing: LocalSpeechError.failed(message["message"] as? String ?? "Local transcription failed.")) }
             } else if type == "error" { fail(LocalSpeechError.failed(message["message"] as? String ?? "Parakeet couldn’t start.")) }
         }

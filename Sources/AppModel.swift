@@ -403,19 +403,35 @@ final class AppModel: ObservableObject {
     /// lists, per-app style, and snippets. Only a heard correction phrase
     /// reaches the on-device model.
     func polish(_ original: String, bundleID: String?, vocabulary: String? = nil,
-                removeFillers: Bool? = nil, voiceCommands: Bool? = nil) async -> String {
-        var text = TextTools.clean(original, replacements: vocabulary ?? preferences.vocabulary,
-                                   removeFillers: removeFillers ?? preferences.cleansFillers,
-                                   voiceCommands: voiceCommands ?? preferences.usesVoiceCommands)
+                removeFillers: Bool? = nil, voiceCommands: Bool? = nil) async -> (text: String, steps: [String]) {
+        let vocabulary = vocabulary ?? preferences.vocabulary
+        let fillers = removeFillers ?? preferences.cleansFillers, commands = voiceCommands ?? preferences.usesVoiceCommands
+        var steps: [String] = []
+        let plain = TextTools.clean(original)
+        var text = TextTools.clean(original, replacements: vocabulary, removeFillers: fillers, voiceCommands: commands)
+        if fillers, TextTools.withoutFillers(plain) != plain { steps.append("Removed filler words") }
+        let fixes = TextTools.appliedReplacements(in: original, replacements: vocabulary)
+        if !fixes.isEmpty { steps.append("Corrected " + fixes.map { "“\($0.heard)” → “\($0.desired)”" }.joined(separator: ", ")) }
+        if commands, text.contains("\n"), !plain.contains("\n") { steps.append("Voice commands added line breaks") }
+        func stage(_ label: String, _ transform: (String) -> String) {
+            let next = transform(text)
+            if next != text { steps.append(label); text = next }
+        }
         if preferences.locale.hasPrefix("en") {
             if preferences.selfCorrections {
-                text = TextPolish.applyingScratchThat(text)
-                if TextPolish.hasCorrectionCue(text), let fixed = await LocalModel.resolveSelfCorrections(text) { text = fixed }
+                stage("“Scratch that” removed a sentence", TextPolish.applyingScratchThat)
+                if TextPolish.hasCorrectionCue(text), let fixed = await LocalModel.resolveSelfCorrections(text), fixed != text {
+                    steps.append("Apple Intelligence applied a change of mind"); text = fixed
+                }
             }
-            if preferences.smartFormatting { text = TextPolish.formattingLists(TextPolish.formattingAddresses(text)) }
-            if preferences.appStyle { text = TextPolish.styled(text, for: .init(bundleID: bundleID)) }
+            if preferences.smartFormatting {
+                stage("Formatted an email or web address", TextPolish.formattingAddresses)
+                stage("Formatted a numbered list", TextPolish.formattingLists)
+            }
+            if preferences.appStyle { stage("Matched the app’s style") { TextPolish.styled($0, for: .init(bundleID: bundleID)) } }
         }
-        return TextPolish.expandingSnippets(text, snippets: preferences.snippets)
+        stage("Expanded a snippet") { TextPolish.expandingSnippets($0, snippets: self.preferences.snippets) }
+        return (text, steps)
     }
 
     /// Collects names and unusual words from the app being dictated into, plus
@@ -450,14 +466,20 @@ final class AppModel: ObservableObject {
         do {
             let original = try await speech.stop()
             guard activeID == id, !Task.isCancelled else { return }
-            var text = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
+            let transcribeSeconds = stopRequestedAt.map { ProcessInfo.processInfo.systemUptime - $0 }
+            let polishStart = ProcessInfo.processInfo.systemUptime
+            let polished = await polish(original, bundleID: pasteTarget?.application.bundleIdentifier)
+            var text = polished.text
+            var details = DictationDetails(contextWords: speech.contextTerms, boostedWords: speech.boostedWords, steps: polished.steps,
+                                           transcribeSeconds: transcribeSeconds)
             guard activeID == id, !Task.isCancelled else { return }
             var editFailed = false
             if let selection = editSelection, !text.isEmpty {
                 editSelection = nil
+            details.polishSeconds = ProcessInfo.processInfo.systemUptime - polishStart
                 hudWorking = "Rewriting…"
                 defer { hudWorking = nil }
-                do { text = try await LocalModel.edit(selection, instruction: text) }
+                do { text = try await LocalModel.edit(selection, instruction: text); details.steps.append("Apple Intelligence edited your selection") }
                 catch {
                     errorMessage = "Your instruction was saved, but the edit didn’t finish. \(error.localizedDescription)"
                     editFailed = true
@@ -474,7 +496,11 @@ final class AppModel: ObservableObject {
             }
             // Deliver immediately when final text exists; history writes and audio
             // retention cleanup should never stand between stop and the clipboard.
-            if review == nil, !text.isEmpty, !editFailed { await deliver(text) }
+            if let i = index(id) { transcripts[i].details = details }
+            if review == nil, !text.isEmpty, !editFailed {
+                await deliver(text)
+                if let i = index(id) { transcripts[i].details?.insertion = deliveryResult?.message }
+            }
             guard activeID == id, !Task.isCancelled else { return }
             if let requestedAt = stopRequestedAt {
                 timingLog.info("Final text ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms; clipboard enabled: \(self.preferences.autoCopy, privacy: .public)")
@@ -638,6 +664,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Types the most recent transcript key by key, for apps that block paste.
+    func typeLastTranscript() {
+        guard !speech.phase.isBusy, activeID == nil, !isTestingFn else { return }
+        guard let entry = lastTranscript else { flashHUD("Nothing to type yet"); return }
+        insertionTestTask?.cancel()
+        insertionTestTask = Task { [weak self] in
+            guard let self else { return }
+            let destination = textInsertion.captureDestination()
+            let result = await textInsertion.type(entry.text, into: destination)
+            guard !Task.isCancelled else { return }
+            deliveryResult = result
+            flashHUD(result.hudMessage, detail: entry.title)
+        }
+    }
+
     func testInsertion() {
         guard !speech.phase.isBusy, activeID == nil else { return }
         showSettings = false
@@ -756,7 +797,7 @@ final class AppModel: ObservableObject {
             do {
                 let original = try await speech.transcribeFile(url, localeID: locale, recognitionEngine: engine, vocabulary: vocabulary)
                 guard !Task.isCancelled, activeID == entry.id else { return }
-                let text = await polish(original, bundleID: nil, vocabulary: vocabulary, removeFillers: removeFillers, voiceCommands: voiceCommands)
+                let text = await polish(original, bundleID: nil, vocabulary: vocabulary, removeFillers: removeFillers, voiceCommands: voiceCommands).text
                 guard !Task.isCancelled, activeID == entry.id else { return }
                 updateActive(text: text, duration: speech.elapsed,
                              status: original.isEmpty ? .failed : .complete)

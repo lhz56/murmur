@@ -148,6 +148,12 @@ struct SettingsView: View {
             LabeledContent("Start or finish") { ShortcutKeys() }
             LabeledContent("Paste last transcript") { ShortcutKeys(keys: ["⌃", "⌥", "V"]) }
             LabeledContent {
+                ShortcutKeys(keys: ["⌃", "⌥", "T"])
+            } label: {
+                Text("Type last transcript")
+                Text("For apps that block pasting, like remote desktops.")
+            }
+            LabeledContent {
                 ShortcutKeys(keys: ["⌃", "⌥", "E"])
             } label: {
                 Text("Edit selection by voice")

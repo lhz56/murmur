@@ -267,6 +267,8 @@ final class DictationEngine: ObservableObject {
     private var selectedVocabulary = ""
     /// Terms gathered from the screen and past corrections for this recording.
     private(set) var contextTerms: [String] = []
+    /// Words the last final pass swapped in from the vocabulary or context.
+    private(set) var boostedWords: [String] = []
     private var stopRequested = false
     private var captureError: Error?
     private let timingLog = Logger(subsystem: "app.murmur.mac", category: "Timing")
@@ -399,6 +401,7 @@ final class DictationEngine: ObservableObject {
         stopRequested = false
         captureError = nil
         recordedURL = audioURL; selectedEngine = recognitionEngine; selectedLocale = localeID; selectedVocabulary = vocabulary
+        boostedWords = []
         selectedMicrophoneUID = microphoneUID
         do {
             let granted = await authorizeMicrophone()
@@ -577,7 +580,7 @@ final class DictationEngine: ObservableObject {
                 let result = try await localSpeech.transcribe(url, engine: selectedEngine, locale: selectedLocale,
                                                               vocabulary: selectedVocabulary, context: contextTerms)
                 try checkSession(session)
-                liveText = result.text; confidence = result.confidence
+                liveText = result.text; confidence = result.confidence; boostedWords = result.vocabularyApplied
             } else {
                 let text = try await SpeechDeadline.run(timeout: finalizationTimeout) { [self] in
                     try await setupTask?.value; try checkSession(session); setupTask = nil
