@@ -17,72 +17,80 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.gif" width="720" alt="Holding Control in a note, saying a sentence, and Murmur inserting it with Recallr and Nkechi spelled correctly">
-  <br><sub>Rendered from Murmur's real recording pill with <code>Tools/RenderDemo.sh</code>. The live preview hears "recaller"; the final text uses the spelling on screen.</sub>
+  <img src="docs/demo.gif" width="720" alt="Holding Control in a note, saying a sentence, and Murmur typing it with Recallr and Nkechi spelled correctly">
 </p>
 
 ---
 
-Hold **Control** in any app, say what you mean, and let go. Murmur turns your voice into clean text where you were typing, a fraction of a second after you let go, without anything leaving your Mac.
+Murmur lets you type with your voice, in any app on your Mac. Hold down the **Control** key, say what you want to write, and let go. Your words show up where you were typing, cleaned up and spelled right.
 
-It runs NVIDIA's Parakeet speech model on the Neural Engine, so it's fast and stays cool on a fanless or quiet Mac. It learns the names and words you use, from your screen, your project, and your own corrections, and it keeps a searchable library of everything you've said.
+It's free, and everything happens on your own computer. Nothing you say is sent anywhere.
 
-## Install
+## Why I built this
 
-You need an **Apple silicon Mac on macOS 26** and Apple's Command Line Tools (`xcode-select --install`).
-
-```sh
-git clone https://github.com/lhz56/murmur.git && cd murmur && ./install.sh
-```
-
-`install.sh` builds the speech helper the first time, builds and signs Murmur locally, installs it in Applications, and opens it. A welcome guide walks you through the Microphone and Accessibility permissions and a first dictation. Run `./install.sh` again after `git pull` to update.
-
-## Use
-
-| Do this | Press |
-|---|---|
-| Dictate (hold, talk, release) | **Control** (or Right Option, Right Command, Fn, or a mouse button) |
-| Hands-free start / finish | **⌃ ⌥ Space** |
-| Cancel | **Esc** |
-| Paste your last transcript again | **⌃ ⌥ V** |
-| Type your last transcript (for apps that block paste) | **⌃ ⌥ T** |
-| Rewrite selected text by voice ("make this shorter") | **⌃ ⌥ E** |
-
-Short taps of Control are ignored, so your normal shortcuts keep working.
+I love dictating instead of typing, but the good dictation apps, like Wispr Flow, cost a monthly subscription and send your voice to their servers. Macs today are fast enough to do all of that themselves, so I built Murmur: the same idea, free forever, open source, and private by design.
 
 ## What it does
 
-**Fast, accurate, local**
-- Parakeet TDT 0.6B on the Neural Engine, with Apple's on-device recognizer for live text while you speak. Whisper is optional.
-- Murmur's own idle CPU use is close to zero: it waits for key events instead of polling the keyboard.
+**🎙️ Talk anywhere, it types for you.** Email, Slack, Notes, your code editor, a browser. If you can type there, you can talk there. You see your words appear while you speak.
 
-**Understands your words**
-- **Context words:** names and unusual words on screen in the app you're dictating into, file and product names from the project you're working on, and optionally your Contacts. A small second model listens for them and swaps them in only when the audio supports it ("recaller" → **Recallr**).
-- **Learns from your fixes:** correct a misheard word right after Murmur types it, or in the library, and it's remembered.
-- **Vocabulary:** your own `heard => meant` corrections.
+**🔒 Private.** Your voice never leaves your Mac. No account, no sign-up, no internet needed once it's set up.
 
-**Writes clean text**
-- Removes "um" and "uh"; "scratch that" deletes the last sentence; "new line" and "new paragraph" work.
-- "lin at gmail dot com" → lin@gmail.com; "one… two… three…" → a numbered list.
-- Matches the app: no closing period in chats and terminals. Voice snippets: "insert my email."
+**🧠 Knows your words.** Murmur looks at what's on your screen and the project you're working on, so names and made-up words come out right. Say "recaller" and it writes **Recallr** if that's what's on your screen. It can also learn names from your Contacts.
 
-**With Apple Intelligence** (optional, also on-device)
-- "Tuesday, no wait, Wednesday" → "Wednesday."
-- Edit selected text by voice, per-app writing styles ("In Mail, professional and concise"), and Ask questions about your notes.
+**✍️ Learns from your fixes.** If Murmur gets a word wrong and you fix it, it remembers for next time.
 
-**A library of everything you've said**
-- Search by keywords or questions, favorites, editing, export, and Trash. Every transcript shows *what Murmur did*: the words it listened for, the cleanup steps, timings, and how the text was inserted.
-- Insights: words per day, speaking pace, and time saved versus typing.
-- Optional audio retention (7, 30, or 90 days) and storage controls.
+**🧹 Cleans up as you go.**
+- Takes out "um" and "uh."
+- Say "scratch that" to delete what you just said.
+- Say "new line" or "new paragraph" to start one.
+- "lin at gmail dot com" becomes lin@gmail.com, and "one… two… three…" becomes a numbered list.
+- Fits the app: casual in chats, no stray periods in the terminal.
 
-**Thoughtful details**
-- Lowers your music while you talk, can leave your clipboard untouched when it pastes, can start quietly at login, and follows light and dark mode.
+**⚡ Shortcuts for things you type a lot.** Say "insert my email" and it types your email address. You set these up yourself.
+
+**✨ Extra smarts with Apple Intelligence** (optional, also on your Mac)
+- Fixes your mid-sentence changes: "Tuesday, no wait, Wednesday" becomes "Wednesday."
+- Rewrite selected text by voice: select a paragraph and say "make this shorter."
+- Ask questions about everything you've dictated before.
+
+**📚 Remembers everything you've said.** Every dictation is saved in a searchable library on your Mac, so you can find, copy, or fix anything later. You can also see how many words you've spoken and how much time you've saved compared to typing.
+
+**🎧 Small touches.** It turns your music down while you talk, can start when your Mac starts, and works in light and dark mode.
+
+## Install
+
+You need a Mac with Apple silicon (M1 or newer) running macOS 26. Open the Terminal app and paste:
+
+```sh
+xcode-select --install
+git clone https://github.com/lhz56/murmur.git && cd murmur && ./install.sh
+```
+
+The first line installs Apple's free developer tools (skip it if you already have them). The second downloads Murmur, builds it, and puts it in your Applications folder. A short welcome guide then walks you through the two permissions it needs (microphone and Accessibility, so it can type for you) and trying your first dictation. To update later, run `git pull && ./install.sh` in the same folder.
+
+## How to use it
+
+| To do this | Press |
+|---|---|
+| Talk and type (hold, talk, let go) | **Control** (you can pick a different key or a mouse button) |
+| Talk without holding a key | **⌃ ⌥ Space** to start, again to finish |
+| Cancel | **Esc** |
+| Paste what you last said again | **⌃ ⌥ V** |
+| Type what you last said (for apps that block pasting) | **⌃ ⌥ T** |
+| Rewrite selected text by voice | **⌃ ⌥ E** |
+
+A quick tap of Control does nothing, so your usual keyboard shortcuts still work.
 
 ## Privacy
 
-Recording, recognition, cleanup, and the optional Apple Intelligence features all run on your Mac. Your library lives in `~/Library/Application Support/Murmur/`. Murmur connects to the internet only to download speech models on first use, and, if you turn it on, to check GitHub for a new release. There's no analytics. [SECURITY.md](SECURITY.md) lists exactly what Murmur reads and when.
+Everything Murmur hears, writes, and saves stays on your Mac, in `~/Library/Application Support/Murmur/`. It only goes online to download the speech model the first time, and, if you turn it on, to check for a new version. There's no tracking of any kind. [SECURITY.md](SECURITY.md) lists exactly what Murmur reads and when.
 
-## Build from source
+## For developers
+
+Murmur runs NVIDIA's Parakeet speech model on the Mac's Neural Engine, so it's fast and stays cool, with Apple's built-in recognizer for the live preview. A second small model listens for your on-screen words and swaps them in only when the audio supports it.
+
+### Build from source
 
 ```sh
 ./Tools/BuildLocalSpeech.sh --parakeet-only   # once: the Parakeet helper (omit the flag to also build Whisper)
