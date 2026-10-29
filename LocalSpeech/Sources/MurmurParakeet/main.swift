@@ -84,8 +84,15 @@ actor Vocabulary {
                 guard let id = request.id, let path = request.path else { continue }
                 do {
                     let result = try await manager.transcribe(URL(fileURLWithPath: path))
-                    emit(["type": "result", "id": id, "text": result.text, "confidence": result.confidence,
-                          "processingTime": result.processingTime, "vocabularyApplied": result.ctcAppliedTerms ?? []])
+                    var message: [String: Any] = ["type": "result", "id": id, "text": result.text, "confidence": result.confidence,
+                                                  "processingTime": result.processingTime, "vocabularyApplied": result.ctcAppliedTerms ?? []]
+                    // The text before custom words were swapped in, so Murmur can undo a swap
+                    // that replaced a plain word you said ("really" → "Recallr").
+                    if result.ctcAppliedTerms?.isEmpty == false, let tokens = result.tokenTimings {
+                        message["original"] = tokens.map(\.token).joined().replacingOccurrences(of: "▁", with: " ")
+                            .trimmingCharacters(in: .whitespaces)
+                    }
+                    emit(message)
                 } catch { emit(["type": "error", "id": id, "message": error.localizedDescription]) }
             }
         } catch { emit(["type": "error", "message": error.localizedDescription]) }

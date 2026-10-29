@@ -16,6 +16,8 @@ struct RecognitionResult {
     let confidence: Float?
     /// Custom or context words Parakeet swapped in.
     var vocabularyApplied: [String] = []
+    /// Parakeet's text before custom words were swapped in, when any were.
+    var original: String?
 }
 enum TranscriptionReview {
     static func reason(text: String, confidence: Float?, signal: InputSignal) -> String? {
@@ -93,6 +95,8 @@ enum LocalSpeechError: LocalizedError {
         let task = Process(); let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         task.executableURL = binary; task.arguments = [(modelDirectory ?? Self.modelRoot).path] + (install ? ["--install"] : [])
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
+        // You're waiting on every result, so don't let macOS schedule it as background work.
+        task.qualityOfService = .userInitiated
         process = task; input = stdin; output = stdout; errorPipe = stderr; buffer = Data()
         session = UUID(); let current = session
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -134,7 +138,8 @@ enum LocalSpeechError: LocalizedError {
                 requestDeadlines.removeValue(forKey: id)?.cancel()
                 if type == "result" {
                     continuation.resume(returning: RecognitionResult(text: message["text"] as? String ?? "", confidence: (message["confidence"] as? NSNumber)?.floatValue,
-                                                                     vocabularyApplied: message["vocabularyApplied"] as? [String] ?? []))
+                                                                     vocabularyApplied: message["vocabularyApplied"] as? [String] ?? [],
+                                                                     original: message["original"] as? String))
                 }
                 else { continuation.resume(throwing: LocalSpeechError.failed(message["message"] as? String ?? "Local transcription failed.")) }
             } else if type == "error" { fail(LocalSpeechError.failed(message["message"] as? String ?? "Parakeet couldn’t start.")) }
@@ -207,6 +212,15 @@ enum SpeechVocabulary {
         }
     }
 
+    /// Undoes context-word swaps that replaced plain words you said clearly.
+    @MainActor static func guarded(_ result: RecognitionResult, terms: [[String: Any]]) -> RecognitionResult {
+        guard let original = result.original, !original.isEmpty else { return result }
+        let aliases = Set(terms.flatMap { $0["aliases"] as? [String] ?? [] }.map { $0.lowercased() })
+        let checked = BoostGuard.filter(original: original, boosted: result.text, aliases: aliases) { !ContextVocabulary.isUnknownWord($0) }
+        let applied = result.vocabularyApplied.filter { term in checked.kept.contains { term.localizedCaseInsensitiveContains($0) } }
+        return RecognitionResult(text: checked.text, confidence: result.confidence, vocabularyApplied: applied, original: original)
+    }
+
     static func terms(_ text: String) -> [String] {
         var seen = Set<String>()
         return text.components(separatedBy: .newlines).compactMap { line in
@@ -235,7 +249,8 @@ enum SpeechVocabulary {
         if engine == .parakeet {
             let supported = ["bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk"]
             guard supported.contains(String(locale.prefix(2))) else { throw LocalSpeechError.unavailable("Parakeet doesn’t support this language. Choose Apple or Whisper in settings.") }
-            return try await parakeet.transcribe(url, vocabulary: SpeechVocabulary.boostTerms(vocabulary, context: context))
+            let terms = SpeechVocabulary.boostTerms(vocabulary, context: context)
+            return SpeechVocabulary.guarded(try await parakeet.transcribe(url, vocabulary: terms), terms: terms)
         }
         guard engine == .whisper, let resources = Bundle.main.resourceURL else { throw LocalSpeechError.unavailable("Choose an available local speech engine.") }
         let binary = resources.appendingPathComponent("Helpers/whisper-cli")

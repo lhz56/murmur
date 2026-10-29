@@ -41,6 +41,28 @@ import Foundation
         assert(pairs("Meet on Tuesday at noon.", "Meet on Friday at noon.").isEmpty) // Different word, not a mishearing.
         assert(pairs("The quick brown fox jumps.", "A totally different sentence now.").isEmpty)
         assert(pairs("Same text.", "Same text.").isEmpty)
+        // One-word "names" that are dictionary words are UI labels, not names.
+        assert(ContextVocabulary.rank(names: ["Done", "Sharif"], words: [:], learned: [], isUnknown: { $0 != "Done" }) == ["Sharif"])
         print("PASS: context terms pick names, product words and past corrections, and drop dictionary words")
+
+        // Real dictations where a context word replaced a plain word that was said clearly.
+        let known: Set<String> = ["i'm", "really", "in", "awe", "of", "i", "don't", "need", "whisper", "flow", "send", "the", "deck",
+                                  "to", "that", "would", "be", "cool", "sharing", "ask", "about", "it", "recaller", "anymore", "we"]
+        func guarded(_ original: String, _ boosted: String, aliases: Set<String> = []) -> String {
+            BoostGuard.filter(original: original, boosted: boosted, aliases: aliases) { known.contains($0) }.text
+        }
+        assert(guarded("I'm really in awe of this.", "I'm Recallr in awe of this.") == "I'm really in awe of this.")
+        assert(guarded("That would be really cool.", "That would be Recallr cool.") == "That would be really cool.")
+        assert(guarded("I don't need Whisper Flow anymore.", "I Done need Wispr Flow anymore.") == "I don't need Wispr Flow anymore.")
+        // Real mishearings stay fixed: sound-alikes, and words the dictionary doesn't know.
+        assert(guarded("send the recaller deck to nkechi", "send the Recallr deck to Nkechi") == "send the Recallr deck to Nkechi")
+        assert(guarded("send the deck to Kechi.", "send the deck to Nkechi.") == "send the deck to Nkechi.")
+        // A correction you listed ("sharing => Sharif") applies even when it doesn't sound alike.
+        assert(guarded("Ask sharing about it.", "Ask Sharif about it.", aliases: ["sharing"]) == "Ask Sharif about it.")
+        assert(guarded("Ask sharing about it.", "Ask Sharif about it.") == "Ask sharing about it.")
+        let kept = BoostGuard.filter(original: "I'm really in awe of Whisper Flow", boosted: "I'm Recallr in awe of Wispr Flow", aliases: []) { known.contains($0) }.kept
+        assert(kept == ["Wispr"], "\(kept)")
+        assert(BoostGuard.soundCode("whisper") == BoostGuard.soundCode("Wispr") && BoostGuard.soundCode("really") != BoostGuard.soundCode("Recallr"))
+        print("PASS: context words don't replace plain words you said clearly, but still fix mishearings")
     }
 }

@@ -15,7 +15,7 @@ struct RecorderHUD: View {
         return listening ? 340 : 300
     }
     private var radius: CGFloat { expanded ? 24 : 29 }
-    private static let spring = Animation.spring(response: 0.34, dampingFraction: 0.86)
+    private static let spring = Animation.spring(response: 0.24, dampingFraction: 0.82)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +34,7 @@ struct RecorderHUD: View {
                 .background(Palette.pill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(.white.opacity(0.13), lineWidth: 1))
                 .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-                .opacity(model.hudVisible ? 1 : 0).scaleEffect(model.hudVisible ? 1 : 0.8, anchor: .bottom)
+                .opacity(model.hudVisible ? 1 : 0).scaleEffect(model.hudVisible ? 1 : 0.92, anchor: .bottom)
                 .animation(Self.spring, value: model.hudVisible)
                 .animation(Self.spring, value: speech.phase)
                 .animation(Self.spring, value: hasWords)

@@ -36,7 +36,7 @@ I love dictating instead of typing, but the good dictation apps, like Wispr Flow
 
 **🔒 Private.** Your voice never leaves your Mac. No account, no sign-up, no internet needed once it's set up.
 
-**🧠 Knows your words.** Murmur looks at what's on your screen and the project you're working on, so names and made-up words come out right. Say "recaller" and it writes **Recallr** if that's what's on your screen. It can also learn names from your Contacts.
+**🧠 Knows your words.** Murmur notices the names and made-up words on your screen and in the project you're working on, and remembers the ones you keep running into. After a while it just knows them, even when they aren't on screen: say "recaller" and it writes **Recallr**. Ordinary words you say clearly are never swapped out. It can also learn names from your Contacts.
 
 **✍️ Learns from your fixes.** If Murmur gets a word wrong and you fix it, it remembers for next time.
 

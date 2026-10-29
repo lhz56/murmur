@@ -410,7 +410,7 @@ final class DictationEngine: ObservableObject {
             guard granted else { throw DictationError.microphone }
             var audioEngine = try await takePreparedInput(uid: microphoneUID)
             guard session == generation, !stopRequested else { throw DictationError.cancelled }
-            timingLog.info("Input graph ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+            timingLog.notice("Input graph ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
             inputName = try Microphones.selected(uid: microphoneUID).name
             var format = audioEngine.inputNode.inputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
@@ -453,7 +453,7 @@ final class DictationEngine: ObservableObject {
                     guard format.sampleRate > 0, format.channelCount > 0 else { throw DictationError.noInput }
                 }
             }
-            timingLog.info("Capture running in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+            timingLog.notice("Capture running in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
             startedAt = Date()
             clock = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
@@ -491,7 +491,7 @@ final class DictationEngine: ObservableObject {
                     await capture.discardPreviewBuffers()
                 }
             }
-            timingLog.info("Microphone ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+            timingLog.notice("Microphone ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
         } catch {
             // A cancelled start can return after the next session has begun.
             // Only the session that owns the engine may tear it down.
@@ -552,7 +552,7 @@ final class DictationEngine: ObservableObject {
         if let start = startedAt { elapsed = Date().timeIntervalSince(start) }
         stopCapture(reuse: true)
         level = 0
-        timingLog.info("Microphone stopped in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
+        timingLog.notice("Microphone stopped in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms")
         Task { [weak self] in
             guard let self else { return }
             await self.warmMicrophone(uid: self.selectedMicrophoneUID)

@@ -225,8 +225,8 @@ enum ContextVocabulary {
         return result
     }
 
-    /// Names always qualify. Other shaped words qualify only when the system
-    /// dictionary doesn't know them, which drops UI labels like "Settings".
+    /// Learned words always qualify. Names and other shaped words qualify only when
+    /// the system dictionary doesn't know them, which drops UI labels like "Settings".
     static func rank(names: [String], words: [String: Int], learned: [String], extra: [String] = [],
                      isUnknown: (String) -> Bool, limit: Int = maxTerms) -> [String] {
         var seen = Set<String>(), result: [String] = []
@@ -235,7 +235,9 @@ enum ContextVocabulary {
             result.append(term)
         }
         learned.forEach(add)
-        names.forEach(add)
+        // A one-word "name" that's also a dictionary word is usually a button or
+        // label ("Done", "Hub"), and boosting it would replace what you said.
+        for name in names where name.contains(" ") || isUnknown(name) { add(name) }
         let ordered = words.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         for (word, _) in ordered where !seen.contains(word.lowercased()) && isUnknown(word) { add(word) }
         // Project and contact names count when any part is unusual ("Nkechi Okafor", not "John Smith").
@@ -260,29 +262,38 @@ enum CorrectionLearner {
     static func pairs(original: String, edited: String) -> [(heard: String, desired: String)] {
         let a = words(original), b = words(edited)
         guard !a.isEmpty, !b.isEmpty, a != b else { return [] }
-        // Longest common subsequence over words, then walk the gaps.
+        let (common, gaps) = differences(a, b, same: ==)
+        // Mostly rewritten text is an edit of meaning, not a recognition fix.
+        guard common * 10 >= a.count * 6 else { return [] }
+        var result: [(String, String)] = []
+        for gap in gaps where (1...3).contains(gap.old.count) && (1...3).contains(gap.new.count) {
+            let heard = a[gap.old].joined(separator: " "), desired = b[gap.new].joined(separator: " ")
+            if accept(heard: heard, desired: desired, atStart: gap.new.lowerBound == 0) { result.append((heard, desired)) }
+        }
+        return result.count <= 3 ? result : []
+    }
+
+    /// Longest common subsequence over words: the number of shared words, and
+    /// each run that differs, as ranges into `a` and `b`.
+    static func differences<T>(_ a: [T], _ b: [T], same: (T, T) -> Bool) -> (common: Int, gaps: [(old: Range<Int>, new: Range<Int>)]) {
         var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
         for i in stride(from: a.count - 1, through: 0, by: -1) {
             for j in stride(from: b.count - 1, through: 0, by: -1) {
-                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+                table[i][j] = same(a[i], b[j]) ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
             }
         }
-        // Mostly rewritten text is an edit of meaning, not a recognition fix.
-        guard table[0][0] * 10 >= a.count * 6 else { return [] }
-        var result: [(String, String)] = []
+        var gaps: [(Range<Int>, Range<Int>)] = []
         var i = 0, j = 0
         while i < a.count || j < b.count {
-            if i < a.count, j < b.count, a[i] == b[j] { i += 1; j += 1; continue }
+            if i < a.count, j < b.count, same(a[i], b[j]) { i += 1; j += 1; continue }
             let startI = i, startJ = j
             while i < a.count || j < b.count {
-                if i < a.count, j < b.count, a[i] == b[j] { break }
+                if i < a.count, j < b.count, same(a[i], b[j]) { break }
                 if j < b.count, i == a.count || table[i][j + 1] >= table[i + 1][j] { j += 1 } else { i += 1 }
             }
-            let heard = a[startI..<i].joined(separator: " "), desired = b[startJ..<j].joined(separator: " ")
-            guard (1...3).contains(i - startI), (1...3).contains(j - startJ) else { continue }
-            if accept(heard: heard, desired: desired, atStart: startJ == 0) { result.append((heard, desired)) }
+            gaps.append((startI..<i, startJ..<j))
         }
-        return result.count <= 3 ? result : []
+        return (table[0][0], gaps)
     }
 
     private static func accept(heard: String, desired: String, atStart: Bool) -> Bool {
@@ -314,5 +325,51 @@ enum CorrectionLearner {
             previous = current
         }
         return 1 - Double(previous[y.count]) / Double(max(x.count, y.count))
+    }
+}
+
+/// Context words are swapped in by a second model that compares how well each
+/// fits the audio. With a word like "Recallr" on screen it can also win over a
+/// plain word you said clearly ("I'm really in awe"). A swap that replaces
+/// ordinary dictionary words is kept only when the two sound alike
+/// ("whisper flow" → "Wispr Flow") or you listed it as a correction.
+enum BoostGuard {
+    static func filter(original: String, boosted: String, aliases: Set<String>, isKnownWord: (String) -> Bool) -> (text: String, kept: [String]) {
+        let a = original.split(whereSeparator: \.isWhitespace).map(String.init)
+        let b = boosted.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !a.isEmpty, a != b else { return (boosted, []) }
+        let gaps = CorrectionLearner.differences(a, b) { normalized($0) == normalized($1) }.gaps
+        var output: [String] = [], kept: [String] = [], position = 0
+        for gap in gaps {
+            output += b[position..<gap.new.lowerBound]
+            position = gap.new.upperBound
+            let heard = a[gap.old].map(normalized).filter { !$0.isEmpty }
+            let term = b[gap.new].map { $0.trimmingCharacters(in: .punctuationCharacters) }.joined(separator: " ")
+            let plainWords = !heard.isEmpty && heard.allSatisfy(isKnownWord)
+            if gap.old.isEmpty || gap.new.isEmpty || !plainWords || aliases.contains(heard.joined(separator: " "))
+                || soundCode(heard.joined()) == soundCode(term) {
+                output += b[gap.new]
+                if !gap.new.isEmpty { kept.append(term) }
+            } else {
+                output += a[gap.old]
+            }
+        }
+        output += b[position...]
+        return (output.joined(separator: " "), kept)
+    }
+
+    static func normalized(_ word: String) -> String { word.trimmingCharacters(in: .punctuationCharacters).lowercased() }
+
+    /// A Soundex-style consonant code over the whole word: "whisper" and
+    /// "Wispr" both give 216, "recaller" and "Recallr" 6246, "really" 64.
+    static func soundCode(_ text: String) -> String {
+        let groups: [String: Character] = ["bfpv": "1", "cgjkqsxz": "2", "dt": "3", "l": "4", "mn": "5", "r": "6"]
+        var code = "", last: Character?
+        for letter in text.lowercased() where letter.isLetter {
+            let digit = groups.first { $0.key.contains(letter) }?.value
+            if let digit, digit != last { code.append(digit) }
+            if "aeiouy".contains(letter) { last = nil } else if digit != nil { last = digit }
+        }
+        return code
     }
 }

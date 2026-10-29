@@ -101,6 +101,12 @@ final class AppModel: ObservableObject {
     /// Text selected when an edit-by-voice recording started.
     private var editSelection: String?
     private var contextTask: Task<Void, Never>?
+    private var responsiveActivity: NSObjectProtocol?
+    private var responsiveRelease: Task<Void, Never>?
+    /// Words Murmur has learned you use. See `Lexicon`.
+    @Published private(set) var lexicon = Lexicon()
+    /// Words found around the current dictation (screen, project), before known words are added.
+    private var nearbyTerms: [String] = []
     private var fixWatch: Task<Void, Never>?
     @Published var errorMessage: String?
     @Published var toast: String?
@@ -169,11 +175,15 @@ final class AppModel: ObservableObject {
                 errorMessage = historyFailure
             }
         }
+        loadLexicon()
         // Only the recording phase affects library-wide controls. Meter, clock and
         // live-text updates arrive many times per second; the views that show them
         // observe `speech` and `microphoneCheck` directly, so the library list and
         // detail pane don't re-render while you talk.
-        speech.$phase.removeDuplicates().sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
+        speech.$phase.removeDuplicates().sink { [weak self] phase in
+            self?.objectWillChange.send()
+            self?.keepResponsive(phase != .idle)
+        }.store(in: &subscriptions)
         preferences.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
         speech.onText = { [weak self] text in
             guard let self, let entry = self.selectedActive, entry.status == .recording else { return }
@@ -306,12 +316,14 @@ final class AppModel: ObservableObject {
         activeID = entry.id
         selectedID = entry.id
         filter = .all; search = ""
+        // Show the pill the moment you press; saving the new entry comes after.
+        hudTask?.cancel(); hudMessage = nil; hudDetail = nil; hudVisible = true; showHUD?(true)
         guard persist(), let audioURL = storage.audioURL(for: entry) else {
             transcripts.removeAll { $0.id == entry.id }
             activeID = nil; selectedID = nil; pasteTarget = nil; fnHoldInProgress = false; editSelection = nil
+            hudVisible = false; hideHUD?()
             return
         }
-        hudTask?.cancel(); hudMessage = nil; hudDetail = nil; hudVisible = true; showHUD?(true)
         startingID = entry.id
         do {
             try await speech.start(audioURL: audioURL, localeID: entry.locale, microphoneUID: preferences.microphoneUID,
@@ -321,7 +333,7 @@ final class AppModel: ObservableObject {
             if let i = index(entry.id) { transcripts[i].microphoneName = speech.inputName }
             onRecordingChanged?(true)
             playSound("start")
-            timingLog.info("Recording ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms from start request")
+            timingLog.notice("Recording ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms from start request")
             checkpointTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.checkpoint() }
             }
@@ -426,6 +438,13 @@ final class AppModel: ObservableObject {
         let fixes = TextTools.appliedReplacements(in: original, replacements: vocabulary)
         if !fixes.isEmpty { steps.append("Corrected " + fixes.map { "“\($0.heard)” → “\($0.desired)”" }.joined(separator: ", ")) }
         if commands, text.contains("\n"), !plain.contains("\n") { steps.append("Voice commands added line breaks") }
+        // Your own vocabulary always counts; learned words only with context words on.
+        let wordsYouUse = SpeechVocabulary.terms(vocabulary) + (preferences.contextWords ? lexicon.confident(isKnownWord: Self.isKnownWord) : [])
+        let soundAlikes = Lexicon.fixingSoundAlikes(text, terms: wordsYouUse, isKnownWord: Self.isKnownWord)
+        if !soundAlikes.fixes.isEmpty {
+            text = soundAlikes.text
+            steps.append("Spelled words you use: " + soundAlikes.fixes.map { "“\($0.heard)” → \($0.term)" }.joined(separator: ", "))
+        }
         func stage(_ label: String, _ transform: (String) -> String) {
             let next = transform(text)
             if next != text { steps.append(label); text = next }
@@ -455,8 +474,11 @@ final class AppModel: ObservableObject {
     /// words corrected in past transcripts, while the user is speaking.
     private func gatherContext() {
         contextTask?.cancel()
-        speech.updateContext([])
-        guard preferences.contextWords else { contextTask = nil; return }
+        nearbyTerms = []
+        guard preferences.contextWords else { speech.updateContext([]); contextTask = nil; return }
+        // Words you use are listened for right away, whatever is on screen.
+        let known = lexicon.top(40, isKnownWord: Self.isKnownWord)
+        speech.updateContext(known)
         let pid = pasteTarget?.application.processIdentifier
         let contacts = preferences.contactNames
         // Only edits you made yourself in the library teach Murmur new words.
@@ -465,9 +487,62 @@ final class AppModel: ObservableObject {
         contextTask = Task { [weak self] in
             let terms = await ContextVocabulary.gather(pid: pid, edits: Array(edits), contacts: contacts)
             guard !Task.isCancelled, let self else { return }
-            speech.updateContext(terms)
-            timingLog.info("Context terms: \(terms.count, privacy: .public)")
+            nearbyTerms = terms
+            var seen = Set<String>()
+            speech.updateContext((terms + known).filter { seen.insert($0.lowercased()).inserted }.prefix(ContextVocabulary.maxTerms).map { $0 })
+            timingLog.notice("Context terms: \(terms.count, privacy: .public)")
         }
+    }
+
+    /// While you dictate, and for a few seconds after (cleanup and pasting),
+    /// macOS mustn't throttle Murmur as a background app (App Nap).
+    private func keepResponsive(_ busy: Bool) {
+        responsiveRelease?.cancel(); responsiveRelease = nil
+        if busy {
+            if responsiveActivity == nil {
+                responsiveActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Dictation")
+            }
+        } else if responsiveActivity != nil {
+            responsiveRelease = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self, let activity = responsiveActivity else { return }
+                ProcessInfo.processInfo.endActivity(activity); responsiveActivity = nil
+            }
+        }
+    }
+
+    static func isKnownWord(_ word: String) -> Bool { !ContextVocabulary.isUnknownWord(word) }
+
+    private var lexiconURL: URL { storage.root.appendingPathComponent("lexicon.json") }
+
+    /// Loads the word memory, or builds it from your library the first time.
+    private func loadLexicon() {
+        if let data = try? Data(contentsOf: lexiconURL), let saved = try? JSONDecoder.iso.decode(Lexicon.self, from: data) {
+            lexicon = saved; return
+        }
+        var built = Lexicon()
+        for entry in transcripts.sorted(by: { $0.createdAt < $1.createdAt }) where entry.deletedAt == nil {
+            if let nearby = entry.details?.contextWords, !nearby.isEmpty { built.saw(nearby, at: entry.createdAt) }
+            built.spoke(entry.text, at: entry.createdAt)
+        }
+        // Your own vocabulary words start out known.
+        for term in SpeechVocabulary.terms(preferences.vocabulary) { built.saw([term]); built.spoke(term) }
+        lexicon = built
+        if !built.entries.isEmpty { saveLexicon() }
+    }
+
+    private func remember(nearby: [String], said text: String) {
+        lexicon.saw(nearby)
+        lexicon.spoke(text)
+        saveLexicon()
+    }
+
+    func forgetWord(_ term: String) { lexicon.forget(term); saveLexicon() }
+
+    private func saveLexicon() {
+        guard writesEnabled, !isPreview, let data = try? JSONEncoder.iso.encode(lexicon) else { return }
+        let url = lexiconURL
+        Task.detached(priority: .utility) { try? data.write(to: url, options: .atomic) }
     }
 
     private static func wait(for task: Task<Void, Never>, upTo limit: Duration) async {
@@ -482,13 +557,13 @@ final class AppModel: ObservableObject {
     private func finishRecording() async {
         if speech.phase == .recording {
             stopRequestedAt = ProcessInfo.processInfo.systemUptime
-            speech.requestStop(); playSound("finish")
+            speech.requestStop(); onRecordingChanged?(false); playSound("finish")
         }
         guard speech.phase == .finishing else { return }
+        onRecordingChanged?(false)
         // Context gathering is bounded and normally finished long before stop;
         // never let a slow app hold up the final text by more than a moment.
         if let contextTask { await Self.wait(for: contextTask, upTo: .milliseconds(400)) }
-        onRecordingChanged?(false)
         checkpointTimer?.invalidate(); checkpointTimer = nil
         let id = activeID
         do {
@@ -516,6 +591,9 @@ final class AppModel: ObservableObject {
             editSelection = nil
             details.polishSeconds = ProcessInfo.processInfo.systemUptime - polishStart
             updateActive(text: text, duration: speech.elapsed, status: text.isEmpty ? .failed : .complete)
+            // Learn from what the recognizer heard, not from Murmur's own fixes,
+            // so a wrong fix can't make itself more likely next time.
+            if preferences.contextWords, !text.isEmpty { remember(nearby: nearbyTerms, said: original) }
             if let i = index(id) { transcripts[i].originalText = original }
             let review = TranscriptionReview.reason(text: original, confidence: speech.confidence, signal: speech.signal)
             if let i = index(id) {
@@ -531,7 +609,8 @@ final class AppModel: ObservableObject {
             }
             guard activeID == id, !Task.isCancelled else { return }
             if let requestedAt = stopRequestedAt {
-                timingLog.info("Final text ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms; clipboard enabled: \(self.preferences.autoCopy, privacy: .public)")
+                timingLog.notice("Stop breakdown: transcribe \((details.transcribeSeconds ?? 0) * 1000, privacy: .public) ms, polish \((details.polishSeconds ?? 0) * 1000, privacy: .public) ms")
+                timingLog.notice("Final text ready in \((ProcessInfo.processInfo.systemUptime - requestedAt) * 1000, privacy: .public) ms; clipboard enabled: \(self.preferences.autoCopy, privacy: .public)")
             }
             guard persist() else {
                 activeID = nil; onRecordingChanged?(false); dismissHUD(message: "Recording kept"); return
@@ -928,7 +1007,7 @@ final class AppModel: ObservableObject {
         guard preferences.sounds else { return }
         if cachedSounds[name] == nil, let url = Bundle.main.url(forResource: name, withExtension: "wav") {
             cachedSounds[name] = NSSound(contentsOf: url, byReference: true)
-            cachedSounds[name]?.volume = 0.38
+            cachedSounds[name]?.volume = 0.6
         }
         cachedSounds[name]?.stop(); cachedSounds[name]?.play()
     }
@@ -936,10 +1015,10 @@ final class AppModel: ObservableObject {
     private func dismissHUD(message: String) {
         hudTask?.cancel(); hudMessage = message
         hudTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.1))
+            try? await Task.sleep(for: .milliseconds(800))
             guard let self, !Task.isCancelled else { return }
             hudVisible = false
-            try? await Task.sleep(for: .milliseconds(400))
+            try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             hideHUD?(); hudMessage = nil; hudDetail = nil
         }

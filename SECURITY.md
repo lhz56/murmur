@@ -9,7 +9,7 @@ Murmur handles what you say and type, so privacy problems are treated as securit
 | Data | When | Where it goes |
 |---|---|---|
 | Microphone audio | Only while recording | Saved in `~/Library/Application Support/Murmur` (optional, with retention settings) and transcribed on this Mac |
-| Text in the focused window | While recording, if "Learn words from your screen" is on | Used in memory to pick names and unusual words; the chosen words are listed on the transcript |
+| Text in the focused window | While recording, if "Learn words from your screen" is on | Used in memory to pick names and unusual words; the chosen words are listed on the transcript, and counted in `lexicon.json` (words only, never the surrounding text) so Murmur remembers the ones you use. Settings → Vocabulary shows them, and you can remove any |
 | Your project's file names and README | While recording in a code editor or terminal, same setting | Used in memory; protected folders (Documents, Desktop, Downloads) are never read |
 | Contacts names | Only if you turn on "Names from Contacts" | Used in memory |
 | The text box you dictate into | During insertion, and for 30 seconds after if "Learn from your fixes" is on | Small word fixes are saved to your vocabulary |

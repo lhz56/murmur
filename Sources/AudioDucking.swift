@@ -37,13 +37,12 @@ final class AudioDucking {
         guard let saved else { return }
         self.saved = nil
         defaults.removeObject(forKey: "duckedVolume")
-        ramp?.cancel()
-        ramp = Task { [weak self] in
-            guard let current = Self.volume(of: saved.device) else { return }
-            // Outside the range we faded through, the user changed it; leave it alone.
-            guard current >= saved.ducked - 0.02, current < saved.original - 0.005 else { return }
-            await self?.fade(saved.device, from: current, to: saved.original)
-        }
+        ramp?.cancel(); ramp = nil
+        // Back up at once, so the stop sound plays at full level.
+        guard let current = Self.volume(of: saved.device) else { return }
+        // Outside the range we faded through, the user changed it; leave it alone.
+        guard current >= saved.ducked - 0.02, current < saved.original - 0.005 else { return }
+        Self.setVolume(saved.original, on: saved.device)
     }
 
     /// Murmur quit or crashed while ducked: put the volume back on next launch.

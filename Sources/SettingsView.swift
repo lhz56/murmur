@@ -527,6 +527,30 @@ struct SettingsView: View {
                 Text("Spell your contacts’ names right. Names stay on this Mac.")
             }
         }
+        if preferences.contextWords {
+            let known = model.lexicon.top(40, isKnownWord: AppModel.isKnownWord)
+            Section {
+                if known.isEmpty {
+                    Text("Nothing yet. Words you keep seeing and saying will show up here.").foregroundStyle(Palette.muted)
+                } else {
+                    FlowLayout(spacing: 6) {
+                        ForEach(known, id: \.self) { term in
+                            HStack(spacing: 4) {
+                                Text(term).font(.system(size: 12))
+                                Button { model.forgetWord(term) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)) }
+                                    .buttonStyle(.plain).foregroundStyle(Palette.muted).help("Forget “\(term)”")
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06), in: Capsule())
+                        }
+                    }
+                }
+            } header: {
+                Text("Words Murmur knows")
+            } footer: {
+                Text("Learned from what you see and say. Murmur listens for these even when they aren’t on screen, and fixes spellings that sound the same, like “recaller” → Recallr.")
+            }
+        }
         Section {
             HStack(spacing: 8) {
                 TextField("Heard", text: $heardWord, prompt: Text("mer mer")).labelsHidden()
@@ -608,5 +632,41 @@ struct FnTestView: View {
                 if let monitor { NSEvent.removeMonitor(monitor) }
                 model.endFnTest()
             }
+    }
+}
+
+/// Lays out chips left to right, wrapping onto new lines.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(subviews, width: proposal.width ?? .infinity)
+        return CGSize(width: rows.map(\.width).max() ?? 0, height: rows.last.map { $0.y + $0.height } ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for row in arrange(subviews, width: bounds.width) {
+            var x = bounds.minX
+            for index in row.items {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: bounds.minY + row.y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+        }
+    }
+
+    private func arrange(_ subviews: Subviews, width: CGFloat) -> [(items: [Int], y: CGFloat, width: CGFloat, height: CGFloat)] {
+        var rows: [(items: [Int], y: CGFloat, width: CGFloat, height: CGFloat)] = []
+        var items: [Int] = [], x: CGFloat = 0, y: CGFloat = 0, height: CGFloat = 0
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            if !items.isEmpty, x + size.width > width {
+                rows.append((items, y, x - spacing, height))
+                y += height + spacing; items = []; x = 0; height = 0
+            }
+            items.append(index); x += size.width + spacing; height = max(height, size.height)
+        }
+        if !items.isEmpty { rows.append((items, y, x - spacing, height)) }
+        return rows
     }
 }
