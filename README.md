@@ -5,7 +5,7 @@
 <h1 align="center">Murmur</h1>
 
 <p align="center">
-  <b>Talk, and it types.</b> Private, on-device dictation for the Mac.<br>
+  <b>Talk, and it types.</b> Private, on-device dictation, meeting notes and voice commands for the Mac.<br>
   Free and open source. No account, no subscription, no cloud.
 </p>
 
@@ -54,6 +54,10 @@ I love dictating instead of typing, but the good dictation apps, like Wispr Flow
 - Rewrite selected text by voice: select a paragraph and say "make this shorter."
 - Ask questions about everything you've dictated before.
 
+**📝 Notes for every meeting.** When a call starts in Zoom, Google Meet, Teams, Slack, FaceTime, Discord or anywhere else, Murmur asks if you'd like notes. It listens to both sides (you through the microphone, everyone else through your Mac's sound), shows the words as people talk, and when the call ends the notes start appearing within seconds: a summary, the topics, decisions, and action items with who's doing what by when. Jot your own notes while you listen and Murmur builds on them; the agenda from your calendar invite helps too. During the call, ask "catch me up" or "what should I ask?"; afterwards, "what did I promise?" or "write a follow-up email." Long meetings are summarized as they go, so the notes don't take longer at the end. You get a notification when they're ready. No bot joins your call, and nothing leaves your Mac. Connect your calendar and meetings get their real names, and a minute before a call you get a "Join & take notes" button.
+
+**⌘ Commands: just say what you want.** Press **Space + Down Arrow** together and type, or hold them and talk: "open Spotify and play Drake", "open murmur in Cursor", "play lofi on YouTube", "search Amazon for desk lamps", "timer 25 minutes", "volume 30", "lock screen", "take meeting notes". It opens apps, websites, files and folders, plays the actual song or video (not just a search page), runs your Shortcuts, and controls your Mac. Select a song name and say "play this." It can also type for you in other apps: "tell Claude to fix the login bug" or "open Slack and write on my way" puts your exact words in the message box, but never presses Send. Simple commands run the moment you let go. Murmur learns from you: pick a different result once and it comes first next time, and typing the start of something you've run before offers it again. **⌘1–⌘9** runs any row. It knows your own sites: "open WorkLoom" goes to your WorkLoom, found in your browser history and project folders, and if it isn't sure it asks once and remembers. Make your own: "work mode" can open everything you need at once.
+
 **📚 Remembers everything you've said.** Every dictation is saved in a searchable library on your Mac, so you can find, copy, or fix anything later. You can also see how many words you've spoken and how much time you've saved compared to typing.
 
 **🎧 Small touches.** It turns your music down while you talk, can start when your Mac starts, and works in light and dark mode.
@@ -67,7 +71,7 @@ xcode-select --install
 git clone https://github.com/lhz56/murmur.git && cd murmur && ./install.sh
 ```
 
-The first line installs Apple's free developer tools (skip it if you already have them). The second downloads Murmur, builds it, and puts it in your Applications folder. A short welcome guide then walks you through the two permissions it needs (microphone and Accessibility, so it can type for you) and trying your first dictation. To update later, run `git pull && ./install.sh` in the same folder.
+The first line installs Apple's free developer tools (skip it if you already have them). The second downloads Murmur, builds it, and puts it in your Applications folder. A short welcome guide then walks you through the two permissions it needs (microphone and Accessibility, so it can type for you), downloads the free models with one click, and has you try dictation and Commands. To update later, run `git pull && ./install.sh` in the same folder.
 
 ## How to use it
 
@@ -79,12 +83,20 @@ The first line installs Apple's free developer tools (skip it if you already hav
 | Paste what you last said again | **⌃ ⌥ V** |
 | Type what you last said (for apps that block pasting) | **⌃ ⌥ T** |
 | Rewrite selected text by voice | **⌃ ⌥ E** |
+| Commands: type, or hold and talk | **Space + ↓** |
+| Meeting notes | Click **Take notes** when Murmur spots a call, or **Take meeting notes** in the sidebar |
 
 A quick tap of Control does nothing, so your usual keyboard shortcuts still work.
 
+## Meeting notes use a free AI model on your Mac
+
+The best notes come from [Ollama](https://ollama.com), a free app that runs AI models on your Mac. Install it, run `ollama pull qwen3:8b` once, and Murmur uses it automatically (on Macs with 32 GB or more it prefers bigger models when you have them). Without Ollama, Murmur uses Apple Intelligence if it's on, and otherwise writes simpler notes on its own. It never uses a paid service.
+
+For Commands, a tiny model is enough: `ollama pull qwen3:1.7b` (1.4 GB) lets Murmur understand loose requests like "put on something chill" in about a fifth of a second. Murmur loads models only when needed and lets them go within a minute, so they don't sit in memory or warm up your Mac.
+
 ## Privacy
 
-Everything Murmur hears, writes, and saves stays on your Mac, in `~/Library/Application Support/Murmur/`. It only goes online to download the speech model the first time, and, if you turn it on, to check for a new version. There's no tracking of any kind. [SECURITY.md](SECURITY.md) lists exactly what Murmur reads and when.
+Everything Murmur hears, writes, and saves stays on your Mac, in `~/Library/Application Support/Murmur/`. Meeting audio is transcribed as it goes and never saved. Murmur only goes online to download the speech model the first time, if you turn it on to check for a new version, and when you ask Commands to play something: then just the song or video name is looked up on YouTube or Brave Search, the same as if you'd searched it yourself. There's no tracking of any kind. [SECURITY.md](SECURITY.md) lists exactly what Murmur reads and when.
 
 ## For developers
 

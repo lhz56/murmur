@@ -2,15 +2,18 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
-/// First-run welcome: what Murmur does, the two permissions it needs, a live
-/// try-it step, and login. Every step can be skipped.
+/// First-run welcome: what Murmur does, the permissions it needs, the free
+/// models it runs on, a live try of dictation and Commands, and login.
+/// Every step can be skipped.
 struct OnboardingView: View {
-    enum Step: Int, CaseIterable { case welcome, permissions, tryIt, finish }
+    enum Step: Int, CaseIterable { case welcome, permissions, models, tryIt, tryCommand, finish }
 
     @ObservedObject var model: AppModel
     @ObservedObject var preferences: Preferences
     @ObservedObject var speech: DictationEngine
     @StateObject private var login = LaunchAtLogin()
+    @StateObject private var setup = ModelSetup()
+    @State private var commandsAtStart = 0
     @State private var step = Step.welcome
     @State private var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
     @State private var tryStartedAt = Date()
@@ -33,7 +36,9 @@ struct OnboardingView: View {
                 switch step {
                 case .welcome: welcome
                 case .permissions: permissions
+                case .models: models
                 case .tryIt: tryIt
+                case .tryCommand: tryCommand
                 case .finish: finish
                 }
             }
@@ -57,11 +62,12 @@ struct OnboardingView: View {
                     .buttonStyle(PrimaryButtonStyle()).keyboardShortcut(.defaultAction)
             }.padding(.horizontal, 24).frame(height: 60)
         }
-        .frame(width: 560, height: 510)
+        .frame(width: 600, height: 520)
         .background(Palette.canvas)
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
         .interactiveDismissDisabled()
+        .task(id: step) { await enter(step) }
         .onReceive(poll) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
     }
@@ -70,7 +76,9 @@ struct OnboardingView: View {
         switch step {
         case .welcome: return "Get started"
         case .permissions: return model.accessibilityEnabled && microphone == .authorized ? "Continue" : "Continue anyway"
+        case .models: return model.parakeetReady && setup.isReady(ModelSetup.commands) ? "Continue" : "Skip for now"
         case .tryIt: return latest == nil ? "Skip for now" : "Continue"
+        case .tryCommand: return triedCommand ? "Continue" : "Skip for now"
         case .finish: return "Start using Murmur"
         }
     }
@@ -79,6 +87,22 @@ struct OnboardingView: View {
         guard let next = Step(rawValue: step.rawValue + delta) else { return }
         if next == .tryIt { tryStartedAt = Date() }
         withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) { step = next }
+    }
+
+    private var triedCommand: Bool { model.commands.history.count > commandsAtStart }
+
+    /// The speech model is what everything runs on, so it starts by itself.
+    private func enter(_ step: Step) async {
+        switch step {
+        case .models:
+            if preferences.recognitionEngine == .parakeet, !model.parakeetReady, !model.parakeetInstalling { model.prepareParakeet() }
+            while !Task.isCancelled {
+                await setup.refresh()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        case .tryCommand: commandsAtStart = model.commands.history.count
+        default: break
+        }
     }
 
     private func done() {
@@ -99,20 +123,20 @@ struct OnboardingView: View {
             WaveMark(size: 56)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Talk, and it types.").font(.system(size: 28, weight: .semibold)).tracking(-0.6)
-                Text("Murmur turns your voice into text in any app on your Mac.")
+                Text("Three things, all running on your Mac. Nothing is uploaded.")
                     .font(.system(size: 14)).foregroundStyle(Palette.muted)
             }
             VStack(alignment: .leading, spacing: 14) {
-                feature("keyboard", "Hold a key, speak, let go", "Your words appear wherever you were typing.")
-                feature("lock.shield", "Private by design", "Speech is recognized on this Mac. Nothing is uploaded.")
-                feature("books.vertical", "Everything is kept", "Every recording is saved to a searchable library.")
+                feature("keyboard", "Dictation", "Hold a key, speak, let go. Your words appear wherever you were typing.")
+                feature("person.2", "Meeting notes", "Hears both sides of any call, then writes the summary and action items.")
+                feature("command", "Commands", "Say what you want: open apps and sites, play music, set reminders.")
             }.padding(.top, 4)
         }
     }
 
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 20) {
-            header("Two quick permissions", "macOS asks you to allow these once.")
+            header("Two quick permissions", "macOS asks once. Murmur can’t hear or type without them.")
             VStack(spacing: 0) {
                 permissionRow(symbol: "mic", title: "Microphone", detail: "So Murmur can hear you.",
                               granted: microphone == .authorized) {
@@ -124,7 +148,7 @@ struct OnboardingView: View {
                 }
                 Hairline().padding(.leading, 52)
                 permissionRow(symbol: "accessibility", title: "Accessibility",
-                              detail: "So the \(keyName) key works in every app and text lands where you type.",
+                              detail: "So its keys work in every app and text lands where you type.",
                               granted: model.accessibilityEnabled) { model.requestAccessibility() }
             }
             .background(Palette.sidebar, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -133,6 +157,95 @@ struct OnboardingView: View {
                 Text("After you switch Murmur on in System Settings, come back here. This screen updates by itself.")
                     .font(.system(size: 12)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private var models: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            header("Get the free models", "They run on this Mac and use memory only while they’re working.")
+            VStack(spacing: 0) {
+                speechRow
+                Hairline().padding(.leading, 52)
+                if setup.isOllamaInstalled {
+                    modelRow(ModelSetup.commands, symbol: "command")
+                    Hairline().padding(.leading, 52)
+                    modelRow(ModelSetup.notes, symbol: "person.2")
+                } else {
+                    setupRow(symbol: "sparkles", title: "Ollama", detail: "Free app that runs the AI for Commands and notes. Install it, then come back.") {
+                        Button("Get Ollama") { NSWorkspace.shared.open(URL(string: "https://ollama.com/download")!) }.buttonStyle(PrimaryButtonStyle())
+                    }
+                }
+            }
+            .background(Palette.sidebar, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.line))
+            Text(setup.problem ?? (setup.isOllamaInstalled ? "You can keep going while these download." : "Without Ollama, dictation and simple commands still work."))
+                .font(.system(size: 12)).foregroundStyle(setup.problem == nil ? Palette.muted : Palette.star).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var speechRow: some View {
+        setupRow(symbol: "waveform", title: "Speech", detail: "Turns your voice into text, offline. About 100 MB.") {
+            if model.parakeetReady { allowedLabel("Ready") }
+            else if model.parakeetInstalling { progress(model.parakeetProgress) }
+            else { Button(model.parakeetPreparationError == nil ? "Download" : "Retry") { model.prepareParakeet() }.buttonStyle(PrimaryButtonStyle()) }
+        }
+    }
+
+    private func modelRow(_ item: ModelSetup.Model, symbol: String) -> some View {
+        setupRow(symbol: symbol, title: item.title, detail: "\(item.detail) \(item.size).") {
+            if setup.isReady(item) { allowedLabel("Ready") }
+            else if let fraction = setup.downloads[item.name] { progress(fraction) }
+            else { Button("Download") { setup.download(item) }.buttonStyle(PrimaryButtonStyle()).disabled(!setup.isOllamaRunning) }
+        }
+    }
+
+    private func progress(_ value: Double) -> some View {
+        HStack(spacing: 8) {
+            ProgressView(value: value).frame(width: 70)
+            Text("\(Int(value * 100))%").font(.system(size: 12)).monospacedDigit().foregroundStyle(Palette.muted).frame(width: 34, alignment: .trailing)
+        }
+    }
+
+    private func allowedLabel(_ text: String) -> some View {
+        Label(text, systemImage: "checkmark.circle.fill").labelStyle(.titleAndIcon)
+            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Palette.green)
+    }
+
+    private func setupRow<Trailing: View>(symbol: String, title: String, detail: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol).font(.system(size: 15)).foregroundStyle(Palette.muted).frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13.5, weight: .medium))
+                Text(detail).font(.system(size: 12)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            trailing()
+        }.padding(.horizontal, 14).padding(.vertical, 14)
+    }
+
+    private var tryCommand: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            header("Now try Commands", "Hold both keys, say it the way you’d say it to a friend, then let go.")
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    ShortcutKeys(keys: ["Space", "↓"])
+                    Text("Tap to type · hold to talk").font(.system(size: 13)).foregroundStyle(Palette.muted)
+                }
+                if triedCommand, let last = model.commands.history.first {
+                    Label("It works", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.green)
+                    Text(last.title).font(.system(size: 15)).lineLimit(2)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(["“Open Calendar”", "“Play some lofi on YouTube”", "“Remind me to call mom tomorrow at 9”"], id: \.self) { Text($0) }
+                    }.font(.system(size: 15))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+            .padding(18)
+            .background(Palette.wash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Text("Commands never presses Send. Anything it writes waits for you.")
+                .font(.system(size: 12)).foregroundStyle(Palette.faint)
         }
     }
 
@@ -179,13 +292,11 @@ struct OnboardingView: View {
             VStack(spacing: 0) {
                 shortcutRow(holds ? "Dictate (hold)" : "Dictate (tap)", [preferences.dictationKey.keyCap])
                 Hairline()
+                shortcutRow("Commands", ["Space", "↓"])
+                Hairline()
                 shortcutRow("Hands-free start / finish", ["⌃", "⌥", "Space"])
                 Hairline()
-                shortcutRow("Paste last transcript", ["⌃", "⌥", "V"])
-                Hairline()
                 shortcutRow("Edit selected text by voice", ["⌃", "⌥", "E"])
-                Hairline()
-                shortcutRow("Cancel", ["Esc"])
             }
             .background(Palette.sidebar, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.line))
@@ -194,7 +305,7 @@ struct OnboardingView: View {
                     Text("Open at login").font(.system(size: 13, weight: .medium))
                     Text("Start quietly in the menu bar, so the shortcut always works.")
                         .font(.system(size: 12)).foregroundStyle(Palette.muted)
-                }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }.toggleStyle(.switch)
         }
     }

@@ -35,6 +35,5 @@ step "Installing to $TARGET"
 ditto Murmur.app "$TARGET/Murmur.app"
 open "$TARGET/Murmur.app"
 
-print "\n✓ Murmur is installed and running. Hold Control in any text box and talk."
-print "  First time: allow Microphone and Accessibility when asked, and download the"
-print "  Parakeet model from the welcome guide or Settings → Transcription."
+print "\n✓ Murmur is installed and running."
+print "  The welcome guide takes it from here: permissions, the free models, and a first try."
