@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 import Carbon
 import Combine
 import ApplicationServices
@@ -11,7 +12,10 @@ final class GlobalShortcut {
     private var pasteKey: EventHotKeyRef?
     private var editKey: EventHotKeyRef?
     private var typeKey: EventHotKeyRef?
+    private var commandKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
+    /// The Commands shortcut went down (true) or up (false).
+    var onCommandKey: ((Bool) -> Void)?
     var onToggle: (() -> Void)?
     var onEscape: (() -> Void)?
     var onPasteLast: (() -> Void)?
@@ -19,20 +23,24 @@ final class GlobalShortcut {
     var onTypeLast: (() -> Void)?
 
     func register() -> OSStatus {
-        var specification = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var specifications = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+                              EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, context -> OSStatus in
             guard let context, let event else { return noErr }
             let shortcut = Unmanaged<GlobalShortcut>.fromOpaque(context).takeUnretainedValue()
             var identifier = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                               MemoryLayout<EventHotKeyID>.size, nil, &identifier)
+            let released = GetEventKind(event) == UInt32(kEventHotKeyReleased)
+            if identifier.id == 6 { shortcut.onCommandKey?(!released); return noErr }
+            if released { return noErr }
             if identifier.id == 1 { shortcut.onToggle?() }
             if identifier.id == 2 { shortcut.onEscape?() }
             if identifier.id == 3 { shortcut.onPasteLast?() }
             if identifier.id == 4 { shortcut.onEdit?() }
             if identifier.id == 5 { shortcut.onTypeLast?() }
             return noErr
-        }, 1, &specification, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        }, 2, &specifications, Unmanaged.passUnretained(self).toOpaque(), &handler)
         // Paste Last Transcript (Control-Option-V) is optional; a conflict leaves it unregistered.
         RegisterEventHotKey(9, UInt32(controlKey | optionKey), EventHotKeyID(signature: 0x4D524D52, id: 3), GetApplicationEventTarget(), 0, &pasteKey)
         // Edit Selection by Voice (Control-Option-E) is optional too.
@@ -55,6 +63,7 @@ final class GlobalShortcut {
         if let pasteKey { UnregisterEventHotKey(pasteKey) }
         if let editKey { UnregisterEventHotKey(editKey) }
         if let typeKey { UnregisterEventHotKey(typeKey) }
+        if let commandKey { UnregisterEventHotKey(commandKey) }
         if let handler { RemoveEventHandler(handler) }
     }
 }
@@ -65,17 +74,43 @@ final class FloatingPanel: NSPanel {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var window: NSWindow!
     private var panel: FloatingPanel!
     private var statusItem: NSStatusItem!
     private let shortcut = GlobalShortcut()
     private let fnShortcut = FnShortcut()
+    /// Space + Down Arrow: Commands.
+    private let commandChord = CommandChordShortcut()
     private var permissionTimer: Timer?
     private var subscriptions = Set<AnyCancellable>()
     let model = AppModel(preview: CommandLine.arguments.contains("--preview"))
     private var launchedAtLogin = false
     private var ducking: AudioDucking?
+    private var palette: KeyPanel!
+    private var promptPanel: FloatingPanel!
+    private var pillPanel: FloatingPanel!
+    private var commandKeyDownAt: TimeInterval?
+    private var commandHoldTask: Task<Void, Never>?
+    private var liveTextTimer: Timer?
+
+    // MARK: Notifications
+
+    /// Timers and "notes ready" show even while Murmur is in front.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
+
+    /// Clicking "Notes ready" opens that meeting.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let identifier = response.notification.request.identifier
+        guard identifier.hasPrefix("meeting-"), let id = UUID(uuidString: String(identifier.dropFirst(8))) else { return }
+        await MainActor.run {
+            model.meetings.selectedID = id
+            model.section = .meetings
+            openLibrary()
+        }
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         launchedAtLogin = LaunchAtLogin.launchedAsLoginItem
@@ -86,8 +121,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         makeMenu()
         makeWindow()
         makeHUD()
+        makePalette()
+        makeMeetingPanels()
         makeStatusItem()
         model.showWindow = { [weak self] in self?.openLibrary() }
+        UNUserNotificationCenter.current().delegate = self
         model.showHUD = { [weak self] capturesEscape in
             if capturesEscape { self?.shortcut.setRecording(true) }
             self?.showRecorder()
@@ -98,9 +136,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self else { return }
             if recording, model.preferences.duckAudio { ducking?.duck() } else if !recording { ducking?.restore() }
             self.shortcut.setRecording(recording)
-            self.updateStatusItem(recording: recording)
+            self.updateStatusItem(recording: recording || self.model.meetings.liveID != nil)
         }
         shortcut.onToggle = { [weak self] in self?.model.toggleRecording() }
+        commandChord.onChord = { [weak self] down in self?.commandKey(down) }
+        model.openCommands = { [weak self] in self?.showPalette() }
+        model.commands.close = { [weak self] in self?.hidePalette() }
+        model.commands.reopen = { [weak self] in self?.showPalette(fresh: false) }
+        model.meetings.onDetectedChanged = { [weak self] call in self?.updatePrompt(call) }
+        model.meetings.onLiveChanged = { [weak self] live in
+            self?.updatePill(live)
+            self?.updateStatusItem(recording: live || self?.model.speech.phase == .recording)
+        }
         shortcut.onEscape = { [weak self] in self?.model.cancelRecording() }
         shortcut.onPasteLast = { [weak self] in self?.model.pasteLastTranscript() }
         shortcut.onEdit = { [weak self] in self?.model.toggleEditRecording() }
@@ -139,11 +186,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }.store(in: &subscriptions)
         if !model.isPreview {
             fnShortcut.refresh()
+            commandChord.start()
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
                     if self.model.accessibilityEnabled != AXIsProcessTrusted() { self.model.refreshPermissions() }
                     if self.model.accessibilityEnabled && self.model.preferences.fnEnabled && !self.model.fnAvailable { self.fnShortcut.refresh() }
+                    if self.model.accessibilityEnabled && !self.commandChord.isRunning { self.commandChord.start() }
                 }
             }
         }
@@ -227,6 +276,141 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         panel.orderFrontRegardless()
     }
 
+    // MARK: Commands palette
+
+    private func makePalette() {
+        palette = KeyPanel(contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
+                           styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView], backing: .buffered, defer: false)
+        palette.isFloatingPanel = true
+        palette.level = .modalPanel
+        palette.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        palette.backgroundColor = .clear
+        palette.isOpaque = false
+        palette.hasShadow = false
+        palette.hidesOnDeactivate = false
+        palette.isReleasedWhenClosed = false
+        palette.onEscape = { [weak self] in self?.paletteEscape() }
+        let host = NSHostingView(rootView: CommandPaletteView(center: model.commands, speech: model.speech)
+            .frame(width: 720, height: 620, alignment: .top))
+        palette.contentView = host
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: palette, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.palette.isVisible, self.model.commands.phase != .listening else { return }
+                self.hidePalette()
+            }
+        }
+    }
+
+    /// `fresh: false` shows it as it is, e.g. with "Which WorkLoom?" choices.
+    private func showPalette(fresh: Bool = true) {
+        guard !palette.isVisible else { NotificationCenter.default.post(name: .murmurPaletteFocus, object: nil); return }
+        let center = model.commands
+        if fresh {
+            let preset = center.query
+            center.prepare()
+            if !preset.isEmpty { center.query = preset }
+        }
+        let location = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(location, $0.frame, false) } ?? NSScreen.main
+        if let frame = screen?.visibleFrame {
+            palette.setFrameOrigin(NSPoint(x: frame.midX - 360, y: frame.maxY - frame.height * 0.2 - 620))
+        }
+        center.isOpen = true
+        palette.makeKeyAndOrderFront(nil)
+        NotificationCenter.default.post(name: .murmurPaletteFocus, object: nil)
+    }
+
+    private func hidePalette() {
+        guard palette.isVisible else { return }
+        // Closing while Murmur is still working out a request means "never mind".
+        if model.commands.phase == .listening || model.commands.phase == .thinking { model.commands.cancel() }
+        model.commands.isOpen = false
+        palette.orderOut(nil)
+        liveTextTimer?.invalidate(); liveTextTimer = nil
+    }
+
+    private func paletteEscape() {
+        let center = model.commands
+        if center.pendingConfirmation != nil { center.pendingConfirmation = nil; return }
+        if center.phase == .listening { center.cancel(); return }
+        if !center.query.isEmpty { center.query = ""; return }
+        hidePalette()
+    }
+
+    /// Tap Space + Down Arrow to type; hold them to speak and let go to run.
+    private func commandKey(_ down: Bool) {
+        let center = model.commands
+        if down {
+            guard commandKeyDownAt == nil else { return }
+            commandKeyDownAt = ProcessInfo.processInfo.systemUptime
+            let wasOpen = palette.isVisible
+            if !wasOpen { showPalette() }
+            commandHoldTask?.cancel()
+            commandHoldTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self, self.commandKeyDownAt != nil else { return }
+                guard self.model.speech.phase == .idle, self.model.activeID == nil else { return }
+                center.beginListening()
+            }
+            if wasOpen { pendingToggleClose = true }
+        } else {
+            let heldFor = commandKeyDownAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0
+            commandKeyDownAt = nil
+            commandHoldTask?.cancel()
+            if center.phase == .listening { center.endListening(); pendingToggleClose = false; return }
+            // A quick second tap closes the palette.
+            if pendingToggleClose, heldFor < 0.2 { hidePalette() }
+            pendingToggleClose = false
+        }
+    }
+    private var pendingToggleClose = false
+
+    // MARK: Meeting panels
+
+    private func makeMeetingPanels() {
+        promptPanel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 412, height: 94),
+                                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        pillPanel = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: 230, height: 56),
+                                  styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        for panel in [promptPanel!, pillPanel!] {
+            panel.isFloatingPanel = true; panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.backgroundColor = .clear; panel.isOpaque = false; panel.hasShadow = false
+            panel.hidesOnDeactivate = false; panel.isMovableByWindowBackground = true
+        }
+        promptPanel.contentView = NSHostingView(rootView: MeetingPromptView(center: model.meetings).frame(width: 412, height: 94))
+        pillPanel.contentView = NSHostingView(rootView: MeetingPillView(center: model.meetings) { [weak self] in
+            self?.model.section = .meetings; self?.model.meetings.selectedID = self?.model.meetings.liveID; self?.openLibrary()
+        }.frame(width: 230, height: 56, alignment: .trailing))
+    }
+
+    private var promptDismissTask: Task<Void, Never>?
+    private func updatePrompt(_ call: MeetingCenter.DetectedCall?) {
+        promptDismissTask?.cancel()
+        guard call != nil else { promptPanel.orderOut(nil); return }
+        if let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+            promptPanel.setFrameOrigin(NSPoint(x: frame.maxX - 412 - 8, y: frame.maxY - 94 - 4))
+        }
+        promptPanel.orderFrontRegardless()
+        playSound("start")
+        // The offer goes away on its own; the call keeps going either way.
+        promptDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(45))
+            guard !Task.isCancelled else { return }
+            self?.model.meetings.dismissDetected()
+        }
+    }
+
+    private func playSound(_ name: String) { model.playSound(name) }
+
+    private func updatePill(_ live: Bool) {
+        guard live else { pillPanel.orderOut(nil); return }
+        if let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+            pillPanel.setFrameOrigin(NSPoint(x: frame.maxX - 230 - 6, y: frame.maxY - 56 - 4))
+        }
+        pillPanel.orderFrontRegardless()
+    }
+
     private func makeStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let menu = NSMenu()
@@ -262,6 +446,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = item("Paste Last Transcript", last == nil || busy ? nil : #selector(pasteLastTranscript), key: "v", modifiers: [.control, .option])
         _ = item("Type Last Transcript", last == nil || busy ? nil : #selector(typeLastTranscript), key: "t", modifiers: [.control, .option])
         _ = item("Edit Selection by Voice", busy ? nil : #selector(editSelectionByVoice), key: "e", modifiers: [.control, .option])
+        menu.addItem(.separator())
+        _ = item("Commands…", #selector(openCommands), key: " ", modifiers: [.option])
+        _ = item(model.meetings.liveID == nil ? "Take Meeting Notes" : "End Meeting and Write Notes", #selector(toggleMeeting))
         menu.addItem(.separator())
         if let update = model.updates.available {
             _ = item("Update Available: Murmur \(update.version)…", #selector(openUpdate))
@@ -314,6 +501,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func openLibrary() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc private func openSettings() { openLibrary(); model.showSettings = true }
     @objc private func toggleRecording() { model.toggleRecording() }
+    @objc private func openCommands() { showPalette() }
+    @objc private func toggleMeeting() {
+        if model.meetings.liveID == nil { model.meetings.start() } else { model.meetings.stop() }
+    }
     @objc private func copyLastTranscript() { if let text = model.lastTranscript?.text { model.copy(text) } }
     @objc private func pasteLastTranscript() { model.pasteLastTranscript() }
     @objc private func importAudio() { openLibrary(); model.importAudio() }
@@ -329,12 +520,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         ducking?.restoreNow()
-        if model.speech.phase.isBusy || model.activeID != nil {
-            Task { await model.prepareToQuit(); shortcut.unregister(); fnShortcut.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
+        if model.speech.phase.isBusy || model.activeID != nil || model.commandListening || model.meetings.hasUnsavedAudio {
+            Task { await model.prepareToQuit(); shortcut.unregister(); fnShortcut.stop(); commandChord.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
             return .terminateLater
         }
+        model.meetings.saveForQuit()
         model.flushEdits(); model.microphoneCheck.stop(); model.speech.localSpeech.parakeet.stop()
-        shortcut.unregister(); fnShortcut.stop(); return .terminateNow
+        shortcut.unregister(); fnShortcut.stop(); commandChord.stop(); return .terminateNow
     }
 }
 

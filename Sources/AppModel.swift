@@ -6,6 +6,8 @@ import Combine
 import OSLog
 
 enum LibraryFilter: String, CaseIterable { case all = "All transcripts", favorites = "Favorites", trash = "Trash" }
+/// The main window's places: your dictations, meetings, and commands.
+enum AppSection: String { case transcripts, meetings, commands }
 
 @MainActor
 final class Preferences: ObservableObject {
@@ -81,6 +83,14 @@ final class AppModel: ObservableObject {
     let storage: HistoryStorage
     let isPreview: Bool
     @Published var transcripts: [Transcript] = []
+    @Published var section: AppSection = .transcripts
+    let meetings: MeetingCenter
+    let commands: CommandCenter
+    /// True while the speech engine is capturing a spoken command, not a dictation.
+    private(set) var commandListening = false
+    /// The microphone is still starting for a command.
+    private var commandStarting = false
+    private var commandAudio: URL?
     @Published var filter: LibraryFilter = .all
     @Published var search = "" {
         didSet {
@@ -128,6 +138,8 @@ final class AppModel: ObservableObject {
     @Published var hudDetail: String?
     var onRecordingChanged: ((Bool) -> Void)?
     var showWindow: (() -> Void)?
+    /// Opens the command palette (Space + Down Arrow).
+    var openCommands: (() -> Void)?
     /// Shows the floating pill. `true` also captures Escape to cancel recording.
     var showHUD: ((_ capturesEscape: Bool) -> Void)?
     var hideHUD: (() -> Void)?
@@ -160,6 +172,8 @@ final class AppModel: ObservableObject {
         preferences = Preferences(preview: preview)
         let root = storageRoot ?? (preview ? FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-preview-\(UUID().uuidString)") :
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Murmur", isDirectory: true))
+        meetings = MeetingCenter(root: root, defaults: preferences.defaults, canWrite: !preview)
+        commands = CommandCenter(defaults: preferences.defaults)
         do { storage = try HistoryStorage(root: root) }
         catch {
             storage = HistoryStorage(unpreparedRoot: root)
@@ -176,6 +190,8 @@ final class AppModel: ObservableObject {
             }
         }
         loadLexicon()
+        configureMeetings()
+        configureCommands()
         // Only the recording phase affects library-wide controls. Meter, clock and
         // live-text updates arrive many times per second; the views that show them
         // observe `speech` and `microphoneCheck` directly, so the library list and
@@ -190,7 +206,7 @@ final class AppModel: ObservableObject {
             self.updateActive(text: text)
         }
         speech.onError = { [weak self] error in
-            guard let self else { return }
+            guard let self, !self.commandListening else { return }
             self.errorMessage = error.localizedDescription
             if self.speech.phase == .recording { self.toggleRecording() }
         }
@@ -238,7 +254,7 @@ final class AppModel: ObservableObject {
     }
 
     func toggleRecording() {
-        guard !isTestingFn else { return }
+        guard !isTestingFn, !commandListening else { return }
         if speech.phase == .recording {
             queueFinish()
         } else if startingID != nil {
@@ -259,7 +275,7 @@ final class AppModel: ObservableObject {
     }
 
     func handleFn(_ action: FnKeyState.Action) {
-        guard !isTestingFn else { return }
+        guard !isTestingFn, !commandListening else { return }
         switch action {
         case .startHold:
             fnHoldInProgress = true
@@ -306,6 +322,8 @@ final class AppModel: ObservableObject {
         microphoneCheck.stop()
         pasteTarget = textInsertion.captureDestination()
         deliveryResult = nil
+        // If macOS ended the speech helper while idle, reload it while you talk.
+        if preferences.recognitionEngine == .parakeet { speech.localSpeech.parakeet.prewarm() }
         gatherContext()
         var entry = Transcript()
         entry.locale = preferences.locale
@@ -1032,6 +1050,8 @@ final class AppModel: ObservableObject {
     }
 
     func prepareToQuit() async {
+        await meetings.prepareToQuit()
+        if commandListening { await speech.abort(); commandListening = false }
         insertionTestTask?.cancel()
         microphoneCheck.stop()
         editSaveTask?.cancel(); persist()
@@ -1069,5 +1089,139 @@ final class AppModel: ObservableObject {
             transcripts.append(entry)
         }
         selectedID = nil
+    }
+}
+
+// MARK: Meetings and Commands
+
+extension AppModel {
+    private func configureMeetings() {
+        let center = meetings
+        center.transcribe = { [weak self] url in
+            guard let self else { throw LocalSpeechError.failed("Murmur is closing.") }
+            let parakeet = speech.localSpeech.parakeet
+            guard parakeet.isInstalled else { throw LocalSpeechError.unavailable("Install the Parakeet model in Settings → Transcription.") }
+            let terms = SpeechVocabulary.boostTerms(preferences.vocabulary, context: meetingWords())
+            return SpeechVocabulary.guarded(try await parakeet.transcribe(url, vocabulary: terms), terms: terms).text
+        }
+        center.cleanup = { [weak self] text in
+            guard let self else { return text }
+            let cleaned = TextTools.clean(text, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers)
+            let words = SpeechVocabulary.terms(preferences.vocabulary) + (preferences.contextWords ? lexicon.confident(isKnownWord: Self.isKnownWord) : [])
+            return Lexicon.fixingSoundAlikes(cleaned, terms: words, isKnownWord: Self.isKnownWord).text
+        }
+        center.vocabulary = { [weak self] in self?.meetingWords() ?? [] }
+        center.prewarm = { [weak self] in self?.speech.localSpeech.parakeet.prewarm() }
+        center.microphoneUID = { [weak self] in self?.preferences.microphoneUID ?? "" }
+        center.isDictating = { [weak self] in
+            guard let self else { return false }
+            return speech.phase == .recording || commandListening
+        }
+        center.showMeeting = { [weak self] in self?.section = .meetings; self?.showWindow?() }
+        center.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
+        center.refreshDetection()
+        if center.calendarConnected { center.refreshCalendar() }
+    }
+
+    /// Names and words the meeting's speech model listens for.
+    private func meetingWords() -> [String] {
+        var words = meetings.live?.attendees.flatMap { $0.split(separator: " ").map(String.init) } ?? []
+        words += preferences.contextWords ? lexicon.top(40, isKnownWord: Self.isKnownWord) : []
+        var seen = Set<String>()
+        return words.filter { $0.count > 1 && seen.insert($0.lowercased()).inserted }.prefix(60).map { $0 }
+    }
+
+    private func configureCommands() {
+        let center = commands
+        center.startListening = { [weak self] in try await self?.startCommandListening() }
+        center.finishListening = { [weak self] in try await self?.finishCommandListening() ?? "" }
+        center.cancelListening = { [weak self] in await self?.cancelCommandListening() }
+        center.startMeeting = { [weak self] in self?.meetings.start(); self?.section = .meetings; self?.showWindow?() }
+        center.stopMeeting = { [weak self] in self?.meetings.stop() }
+        center.openMurmur = { [weak self] target in
+            guard let self else { return }
+            switch target {
+            case "settings": showWindow?(); showSettings = true
+            case "meetings": section = .meetings; showWindow?()
+            default: section = .transcripts; showWindow?()
+            }
+        }
+        center.flash = { [weak self] message, detail in self?.flashHUD(message, detail: detail) }
+        center.playSound = { [weak self] name in self?.playSound(name) }
+        center.liveTranscript = { [weak self] in self?.speech.liveText ?? "" }
+        center.typeText = { [weak self] words in
+            guard let self else { return "Murmur is closing." }
+            let destination = textInsertion.captureDestination()
+            // Insertion pastes from the clipboard: borrow it, and give back what was there once it worked.
+            let pasteboard = NSPasteboard.general
+            let borrowed = PasteboardSnapshot(pasteboard)
+            pasteboard.clearContents()
+            pasteboard.setString(words, forType: .string)
+            let written = pasteboard.changeCount
+            let result = await textInsertion.insert(words, into: destination)
+            if case .inserted = result, pasteboard.changeCount == written { borrowed?.restore(to: pasteboard) }
+            if case .inserted = result { return nil }
+            return destination == nil ? "Click into a text box first, then try again." : result.message
+        }
+        center.selectedTextProvider = { [weak self] in
+            guard let self else { return nil }
+            let destination = textInsertion.captureDestination()
+            return textInsertion.selectedText(in: destination)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        }
+    }
+
+    /// Records a spoken command with the same engine as dictation, without
+    /// adding it to your library or pasting it anywhere.
+    private func startCommandListening() async throws {
+        guard speech.phase == .idle, activeID == nil, !commandListening else { throw DictationError.unavailable }
+        commandListening = true
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-command-\(UUID().uuidString).m4a")
+        commandAudio = url
+        if preferences.recognitionEngine == .parakeet { speech.localSpeech.parakeet.prewarm() }
+        do {
+            commandStarting = true
+            defer { commandStarting = false }
+            try await speech.start(audioURL: url, localeID: preferences.locale, microphoneUID: preferences.microphoneUID,
+                                   recognitionEngine: preferences.recognitionEngine, vocabulary: preferences.vocabulary)
+            // Let go before the microphone was ready: turn it straight back off.
+            if !commandListening {
+                await speech.abort()
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            // Only your own words: hinting every installed app name made speech hear
+            // "slowed" as "Xcode". The parser already matches misheard app names.
+            speech.updateContext(Array(lexicon.top(20, isKnownWord: Self.isKnownWord).prefix(ContextVocabulary.maxTerms)))
+            playSound("start")
+        } catch {
+            commandListening = false; commandAudio = nil
+            throw error
+        }
+    }
+
+    private func finishCommandListening() async throws -> String {
+        guard commandListening else { return "" }
+        // Still starting: nothing was heard yet; startup sees this and stops the microphone.
+        if commandStarting {
+            commandListening = false; commandAudio = nil
+            return ""
+        }
+        playSound("finish")
+        defer {
+            commandListening = false
+            if let url = commandAudio { try? FileManager.default.removeItem(at: url) }
+            commandAudio = nil
+        }
+        let heard = try await speech.stop()
+        return TextTools.clean(heard, replacements: preferences.vocabulary, removeFillers: true)
+    }
+
+    private func cancelCommandListening() async {
+        guard commandListening else { return }
+        if commandStarting { commandListening = false; commandAudio = nil; return }
+        await speech.abort()
+        commandListening = false
+        if let url = commandAudio { try? FileManager.default.removeItem(at: url) }
+        commandAudio = nil
     }
 }

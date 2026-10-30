@@ -14,4 +14,8 @@
 <key>NSMicrophoneUsageDescription</key><string>Murmur listens while you record to turn your voice into text, privately on your Mac.</string>
 <key>NSContactsUsageDescription</key><string>Murmur listens for the names in your contacts so they’re spelled right when you dictate. Names never leave your Mac.</string>
 <key>NSSpeechRecognitionUsageDescription</key><string>Murmur transcribes your recordings on your Mac so you can type with your voice.</string>
+<key>NSAudioCaptureUsageDescription</key><string>For meeting notes, Murmur listens to what your Mac plays (the other people on a call) and transcribes it on this Mac. Audio is never saved or sent anywhere.</string>
+<key>NSAppleEventsUsageDescription</key><string>Commands can play music in Spotify or Music, switch dark mode, and empty the Trash when you ask.</string>
+<key>NSCalendarsFullAccessUsageDescription</key><string>Murmur names your meetings and lists who’s there using your calendar, and adds events when you ask. Your calendar never leaves your Mac.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>Murmur adds reminders when you ask, like “remind me to apply to a16z Speedrun tomorrow”. Your reminders never leave your Mac.</string>
 </dict></plist>
