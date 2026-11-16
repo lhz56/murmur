@@ -1,7 +1,7 @@
 #!/bin/zsh
 # One command to build Murmur and install it in Applications:
-#   ./install.sh            build the Parakeet helper if missing, build, install, open
-#   ./install.sh --rebuild  also rebuild the Parakeet helper (after updating dependencies)
+#   ./install.sh            build the speech and voice helpers if missing, build, install, open
+#   ./install.sh --rebuild  also rebuild the helpers (after updating dependencies)
 # Run it again after `git pull` to update.
 set -euo pipefail
 PROJECT_DIR=${0:A:h}
@@ -14,8 +14,8 @@ step() { print "\n→ $1"; }
 [[ ${$(sw_vers -productVersion)%%.*} -ge 26 ]] || fail "Murmur needs macOS 26 or later."
 command -v swiftc >/dev/null || fail "Install Apple's Command Line Tools first: xcode-select --install"
 
-if [[ "${1:-}" == "--rebuild" || ! -x Resources/Helpers/MurmurParakeet ]]; then
-  step "Building the Parakeet speech helper (first time takes a few minutes)"
+if [[ "${1:-}" == "--rebuild" || ! -x Resources/Helpers/MurmurParakeet || ! -x Resources/Helpers/MurmurVoice ]]; then
+  step "Building the speech and voice helpers (first time takes a few minutes)"
   ./Tools/BuildLocalSpeech.sh --parakeet-only
 fi
 
@@ -35,6 +35,5 @@ step "Installing to $TARGET"
 ditto Murmur.app "$TARGET/Murmur.app"
 open "$TARGET/Murmur.app"
 
-print "\n✓ Murmur is installed and running. Hold Control in any text box and talk."
-print "  First time: allow Microphone and Accessibility when asked, and download the"
-print "  Parakeet model from the welcome guide or Settings → Transcription."
+print "\n✓ Murmur is installed and running."
+print "  The welcome guide takes it from here: permissions, the free models, and a first try."

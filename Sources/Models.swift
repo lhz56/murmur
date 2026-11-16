@@ -31,7 +31,7 @@ struct Transcript: Identifiable, Codable, Equatable {
     }
     /// The words after the title, for a second line that continues instead of repeating.
     var preview: String {
-        titleSplit.rest.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        TextScan.collapsing(titleSplit.rest, \.isWhitespace)
     }
     /// The first line, cut at a word boundary near 64 characters, and everything after it.
     private var titleSplit: (head: String, rest: String, endsLine: Bool) {
@@ -170,17 +170,14 @@ enum TextTools {
     static func clean(_ text: String, replacements: String = "", removeFillers: Bool = false, voiceCommands: Bool = false) -> String {
         var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if removeFillers { result = withoutFillers(result) }
-        result = result.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+        result = TextScan.collapsing(result, TextScan.isSpaceOrTab)
         for line in replacements.components(separatedBy: .newlines) {
             let pair = line.components(separatedBy: "=>")
             guard pair.count == 2 else { continue }
             let heard = pair[0].trimmingCharacters(in: .whitespaces)
             let desired = pair[1].trimmingCharacters(in: .whitespaces)
             guard !heard.isEmpty, !desired.isEmpty else { continue }
-            let pattern = "(?i)(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: heard) + "(?![\\p{L}\\p{N}])"
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: NSRegularExpression.escapedTemplate(for: desired))
-            }
+            result = TextScan.replacing(heard, with: desired, in: result)
         }
         if voiceCommands { result = applyingVoiceCommands(result) }
         return result
@@ -191,24 +188,65 @@ enum TextTools {
         replacements.components(separatedBy: .newlines).compactMap { line in
             let pair = line.components(separatedBy: "=>").map { $0.trimmingCharacters(in: .whitespaces) }
             guard pair.count == 2, !pair[0].isEmpty, !pair[1].isEmpty else { return nil }
-            let pattern = "(?i)(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: pair[0]) + "(?![\\p{L}\\p{N}])"
-            return text.range(of: pattern, options: .regularExpression) != nil ? (pair[0], pair[1]) : nil
+            return TextScan.contains(pair[0], in: text) ? (pair[0], pair[1]) : nil
         }
     }
 
     /// English hesitation sounds the recognizer writes out: um, uh, erm, hmm.
     /// Real words ("uh-huh", "umbrella") are left alone, along with the commas
     /// that set a filler off, and a sentence that began with one is recapitalized.
-    private static let filler = try! NSRegularExpression(
-        pattern: "(?i)(,\\s*)?(?<![\\p{L}\\p{N}'’-])(?:u+h+m*|u+m+|e+r+m+|h+m+)(?![\\p{L}\\p{N}'’-])(\\s*,)?")
+    /// um, umm, uh, uhm, erm, hmm: each letter repeated any number of times.
+    static func isFiller(_ word: String) -> Bool {
+        let letters = Array(word.lowercased())
+        func shape(_ parts: [(Character, Bool)]) -> Bool {
+            // Each part is a letter that must appear (true) or may be left out (false), repeated any number of times.
+            var index = 0
+            for (letter, required) in parts {
+                var count = 0
+                while index < letters.count, letters[index] == letter { index += 1; count += 1 }
+                if required, count == 0 { return false }
+            }
+            return index == letters.count
+        }
+        return shape([("u", true), ("h", true), ("m", false)]) || shape([("u", true), ("m", true)])
+            || shape([("e", true), ("r", true), ("m", true)]) || shape([("h", true), ("m", true)])
+    }
 
     static func withoutFillers(_ text: String) -> String {
         var result = text
-        for match in filler.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
-            guard let range = Range(match.range, in: result) else { continue }
+        // Words, with apostrophes and hyphens as part of them: "uh-huh" isn't "uh".
+        var words: [Range<String.Index>] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard TextScan.isWord(text[index], extra: "'’-") else { index = text.index(after: index); continue }
+            let start = index
+            while index < text.endIndex, TextScan.isWord(text[index], extra: "'’-") { index = text.index(after: index) }
+            words.append(start..<index)
+        }
+        // Worked out front to back, so a comma between two fillers goes with the first one only.
+        var cuts: [Range<String.Index>] = []
+        for word in words where isFiller(String(text[word])) {
+            // The comma that sets it off goes with it: ", um," or "um, ".
+            let floor = cuts.last?.upperBound ?? text.startIndex
+            guard word.lowerBound >= floor else { continue }
+            var lower = word.lowerBound, upper = word.upperBound
+            var back = lower
+            while back > floor, text[text.index(before: back)].isWhitespace { back = text.index(before: back) }
+            if back > floor, text[text.index(before: back)] == "," { lower = text.index(before: back) }
+            var ahead = upper
+            while ahead < text.endIndex, text[ahead].isWhitespace { ahead = text.index(after: ahead) }
+            if ahead < text.endIndex, text[ahead] == "," { upper = text.index(after: ahead) }
+            cuts.append(lower..<upper)
+        }
+        for cut in cuts.reversed() {
+            let lower = cut.lowerBound, upper = cut.upperBound
+            // Same offsets in `result`: everything after this point was already edited, nothing before it.
+            let offset = text.distance(from: text.startIndex, to: lower)
+            let length = text.distance(from: lower, to: upper)
+            let from = result.index(result.startIndex, offsetBy: offset)
+            let range = from..<result.index(from, offsetBy: length)
             let before = result[..<range.lowerBound].trimmingCharacters(in: .whitespaces)
             let startsSentence = before.isEmpty || ".!?\n".contains(before.last!)
-            let offset = result.distance(from: result.startIndex, to: range.lowerBound)
             result.replaceSubrange(range, with: "")
             let start = result.index(result.startIndex, offsetBy: offset)
             if startsSentence, let letter = result[start...].firstIndex(where: { !$0.isWhitespace }),
@@ -216,8 +254,8 @@ enum TextTools {
                 result.replaceSubrange(letter...letter, with: result[letter].uppercased())
             }
         }
-        result = result.replacingOccurrences(of: "[ \\t]+([,.!?;:])", with: "$1", options: .regularExpression)
-        result = result.replacingOccurrences(of: "[ \\t]{2,}", with: " ", options: .regularExpression)
+        result = TextScan.tightening(result, before: ",.!?;:")
+        result = TextScan.collapsing(result, TextScan.isSpaceOrTab, minimum: 2)
         result = result.trimmingCharacters(in: .whitespacesAndNewlines)
         // A recording that was only "Um." leaves nothing worth inserting.
         return result.contains(where: { $0.isLetter || $0.isNumber }) ? result : ""
@@ -225,17 +263,21 @@ enum TextTools {
 
     /// Spoken "new line" and "new paragraph" become line breaks. The comma or
     /// period the recognizer puts around a command is dropped with it.
-    private static let command = try! NSRegularExpression(
-        pattern: "(?i)[,;]?[ \\t]*(?<![\\p{L}\\p{N}])new (line|paragraph)(?![\\p{L}\\p{N}])[.,;:!?]?[ \\t]*")
-
     static func applyingVoiceCommands(_ text: String) -> String {
         var result = text
-        for match in command.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
-            guard let range = Range(match.range, in: result), let kind = Range(match.range(at: 1), in: result) else { continue }
-            let breaks = result[kind].lowercased() == "line" ? "\n" : "\n\n"
-            let offset = result.distance(from: result.startIndex, to: range.lowerBound) + breaks.count
-            result.replaceSubrange(range, with: breaks)
-            let start = result.index(result.startIndex, offsetBy: offset)
+        let found = (TextScan.ranges(of: "new line", in: text).map { ($0, "\n") } + TextScan.ranges(of: "new paragraph", in: text).map { ($0, "\n\n") })
+            .sorted { $0.0.lowerBound < $1.0.lowerBound }
+        for (phrase, breaks) in found.reversed() {
+            // Spaces and one comma or semicolon before; one mark and spaces after.
+            var lower = phrase.lowerBound, upper = phrase.upperBound
+            while lower > text.startIndex, TextScan.isSpaceOrTab(text[text.index(before: lower)]) { lower = text.index(before: lower) }
+            if lower > text.startIndex, ",;".contains(text[text.index(before: lower)]) { lower = text.index(before: lower) }
+            if upper < text.endIndex, ".,;:!?".contains(text[upper]) { upper = text.index(after: upper) }
+            while upper < text.endIndex, TextScan.isSpaceOrTab(text[upper]) { upper = text.index(after: upper) }
+            let offset = text.distance(from: text.startIndex, to: lower)
+            let from = result.index(result.startIndex, offsetBy: offset)
+            result.replaceSubrange(from..<result.index(from, offsetBy: text.distance(from: lower, to: upper)), with: breaks)
+            let start = result.index(result.startIndex, offsetBy: offset + breaks.count)
             if start < result.endIndex, result[start].isLowercase {
                 result.replaceSubrange(start...start, with: result[start].uppercased())
             }

@@ -52,7 +52,8 @@ enum LocalSpeechError: LocalizedError {
     var isReady = false
     private var session = UUID()
     private var startupDeadline: Task<Void, Never>?
-    var startupTimeout: Duration = .seconds(60)
+    /// Loading the model can take a minute or more when the Mac is short on memory.
+    var startupTimeout: Duration = .seconds(180)
     var requestTimeout: Duration = .seconds(120)
     var onProgress: ((Double) -> Void)?
     var onReadiness: ((Bool) -> Void)?
@@ -105,7 +106,14 @@ enum LocalSpeechError: LocalizedError {
         }
         stderr.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
         task.terminationHandler = { [weak self] _ in
-            Task { @MainActor in if self?.session == current { self?.fail(LocalSpeechError.failed("Parakeet stopped. Your recording was kept; try again.")) } }
+            Task { @MainActor in
+                guard let self, self.session == current else { return }
+                let wasReady = self.isReady
+                self.fail(LocalSpeechError.failed("Parakeet stopped. Your recording was kept; try again."))
+                // macOS can end an idle helper to free memory. Start it again quietly,
+                // so it's loaded before your next dictation rather than during it.
+                if wasReady { self.relaunchSoon() }
+            }
         }
         try task.run()
         let timeout = install ? Duration.seconds(300) : startupTimeout
@@ -171,6 +179,23 @@ enum LocalSpeechError: LocalizedError {
                 self?.waiting.removeValue(forKey: id)?.resume(throwing: CancellationError())
             }
         }
+    }
+    private var relaunches: [Date] = []
+    var relaunchesAutomatically = true
+    private func relaunchSoon() {
+        guard relaunchesAutomatically else { return }
+        relaunches = relaunches.filter { $0.timeIntervalSinceNow > -600 } + [Date()]
+        guard relaunches.count <= 3 else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, self.process == nil else { return }
+            try? await self.start()
+        }
+    }
+    /// Starts loading in the background if it isn't running, e.g. when a recording begins.
+    func prewarm() {
+        guard isInstalled, process == nil else { return }
+        Task { [weak self] in try? await self?.start() }
     }
     func stop() { fail(LocalSpeechError.failed("Local transcription was stopped.")) }
     private func fail(_ error: Error) {

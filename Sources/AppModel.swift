@@ -6,6 +6,22 @@ import Combine
 import OSLog
 
 enum LibraryFilter: String, CaseIterable { case all = "All transcripts", favorites = "Favorites", trash = "Trash" }
+/// The pages of Settings.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case general = "General", dictation = "Dictation", words = "Words", assistant = "Ask"
+    var id: Self { self }
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .dictation: return "waveform"
+        case .words: return "character.book.closed"
+        case .assistant: return "eye"
+        }
+    }
+}
+
+/// The main window's places: home, your dictations, meetings, and commands.
+enum AppSection: String { case home, transcripts, meetings, commands, health }
 
 @MainActor
 final class Preferences: ObservableObject {
@@ -36,6 +52,7 @@ final class Preferences: ObservableObject {
     @Published var mouseButton: Int { didSet { defaults.set(mouseButton, forKey: "mouseButton") } }
     @Published var typingSpeed: Int { didSet { defaults.set(typingSpeed, forKey: "typingSpeed") } }
     @Published var checkForUpdates: Bool { didSet { defaults.set(checkForUpdates, forKey: "checkForUpdates") } }
+    @Published var macHealth: Bool { didSet { defaults.set(macHealth, forKey: "macHealth") } }
     @Published var microphoneUID: String { didSet { defaults.set(microphoneUID, forKey: "microphoneUID") } }
     @Published var recognitionEngine: RecognitionEngine { didSet { defaults.set(recognitionEngine.rawValue, forKey: "recognitionEngine") } }
     init(preview: Bool) {
@@ -65,6 +82,7 @@ final class Preferences: ObservableObject {
         mouseButton = defaults.integer(forKey: "mouseButton")
         typingSpeed = defaults.object(forKey: "typingSpeed") as? Int ?? 40
         checkForUpdates = defaults.bool(forKey: "checkForUpdates")
+        macHealth = defaults.object(forKey: "macHealth") as? Bool ?? true
         microphoneUID = defaults.string(forKey: "microphoneUID") ?? ""
         recognitionEngine = RecognitionEngine(rawValue: defaults.string(forKey: "recognitionEngine") ?? "") ?? (preview ? .apple : .parakeet)
     }
@@ -81,6 +99,16 @@ final class AppModel: ObservableObject {
     let storage: HistoryStorage
     let isPreview: Bool
     @Published var transcripts: [Transcript] = []
+    @Published var section: AppSection = .home
+    let meetings: MeetingCenter
+    let commands: CommandCenter
+    /// Ask: questions about your screen, answered by ChatGPT or Claude.
+    let assistant: AssistantCenter
+    /// True while the speech engine is capturing a spoken command, not a dictation.
+    private(set) var commandListening = false
+    /// The microphone is still starting for a command.
+    private var commandStarting = false
+    private var commandAudio: URL?
     @Published var filter: LibraryFilter = .all
     @Published var search = "" {
         didSet {
@@ -90,9 +118,13 @@ final class AppModel: ObservableObject {
     @Published var selectedID: UUID?
     @Published var activeID: UUID?
     @Published var showSettings = false
+    /// Open Settings on Mac Health instead of General.
+    /// The Settings page to open next.
+    @Published var settingsPane: SettingsPane = .general
     @Published var showOnboarding = false
     @Published var showStats = false
     let updates = UpdateChecker()
+    let health = MacHealth()
     /// Answer from Ask, shown above the list while the question is unchanged.
     @Published var answer: (question: String, text: String)?
     @Published var answering = false
@@ -128,6 +160,10 @@ final class AppModel: ObservableObject {
     @Published var hudDetail: String?
     var onRecordingChanged: ((Bool) -> Void)?
     var showWindow: (() -> Void)?
+    /// Opens the command palette (Space + Down Arrow).
+    var openCommands: (() -> Void)?
+    /// Starts Ask, listening hands-free (the Home page's "Try it").
+    var askNow: (() -> Void)?
     /// Shows the floating pill. `true` also captures Escape to cancel recording.
     var showHUD: ((_ capturesEscape: Bool) -> Void)?
     var hideHUD: (() -> Void)?
@@ -160,6 +196,9 @@ final class AppModel: ObservableObject {
         preferences = Preferences(preview: preview)
         let root = storageRoot ?? (preview ? FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-preview-\(UUID().uuidString)") :
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Murmur", isDirectory: true))
+        meetings = MeetingCenter(root: root, defaults: preferences.defaults, canWrite: !preview)
+        commands = CommandCenter(defaults: preferences.defaults)
+        assistant = AssistantCenter(defaults: preferences.defaults)
         do { storage = try HistoryStorage(root: root) }
         catch {
             storage = HistoryStorage(unpreparedRoot: root)
@@ -176,6 +215,9 @@ final class AppModel: ObservableObject {
             }
         }
         loadLexicon()
+        configureMeetings()
+        configureCommands()
+        configureAssistant()
         // Only the recording phase affects library-wide controls. Meter, clock and
         // live-text updates arrive many times per second; the views that show them
         // observe `speech` and `microphoneCheck` directly, so the library list and
@@ -190,7 +232,7 @@ final class AppModel: ObservableObject {
             self.updateActive(text: text)
         }
         speech.onError = { [weak self] error in
-            guard let self else { return }
+            guard let self, !self.commandListening else { return }
             self.errorMessage = error.localizedDescription
             if self.speech.phase == .recording { self.toggleRecording() }
         }
@@ -238,7 +280,12 @@ final class AppModel: ObservableObject {
     }
 
     func toggleRecording() {
-        guard !isTestingFn else { return }
+        // Ask is only listening for a follow-up: dictation wins the microphone.
+        if commandListening, assistant.autoListening {
+            Task { await assistant.yieldMicrophone(); toggleRecording() }
+            return
+        }
+        guard !isTestingFn, !commandListening else { return }
         if speech.phase == .recording {
             queueFinish()
         } else if startingID != nil {
@@ -259,7 +306,11 @@ final class AppModel: ObservableObject {
     }
 
     func handleFn(_ action: FnKeyState.Action) {
-        guard !isTestingFn else { return }
+        if commandListening, assistant.autoListening, action == .startHold || action == .toggle {
+            Task { await assistant.yieldMicrophone(); handleFn(action) }
+            return
+        }
+        guard !isTestingFn, !commandListening else { return }
         switch action {
         case .startHold:
             fnHoldInProgress = true
@@ -306,6 +357,8 @@ final class AppModel: ObservableObject {
         microphoneCheck.stop()
         pasteTarget = textInsertion.captureDestination()
         deliveryResult = nil
+        // If macOS ended the speech helper while idle, reload it while you talk.
+        if preferences.recognitionEngine == .parakeet { speech.localSpeech.parakeet.prewarm() }
         gatherContext()
         var entry = Transcript()
         entry.locale = preferences.locale
@@ -1025,6 +1078,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Briefly shows a result in the pill when no recording is in progress.
+    func flashHealthWarning(_ reading: HealthReading) { flashHUD(reading.title, detail: reading.detail) }
+
     private func flashHUD(_ message: String, detail: String? = nil) {
         guard activeID == nil, !speech.phase.isBusy else { return }
         hudDetail = detail; hudVisible = true; showHUD?(false)
@@ -1032,6 +1087,8 @@ final class AppModel: ObservableObject {
     }
 
     func prepareToQuit() async {
+        await meetings.prepareToQuit()
+        if commandListening { await speech.abort(); commandListening = false }
         insertionTestTask?.cancel()
         microphoneCheck.stop()
         editSaveTask?.cancel(); persist()
@@ -1069,5 +1126,194 @@ final class AppModel: ObservableObject {
             transcripts.append(entry)
         }
         selectedID = nil
+    }
+}
+
+// MARK: Meetings and Commands
+
+extension AppModel {
+    private func configureMeetings() {
+        let center = meetings
+        center.transcribe = { [weak self] url in
+            guard let self else { throw LocalSpeechError.failed("Murmur is closing.") }
+            let parakeet = speech.localSpeech.parakeet
+            guard parakeet.isInstalled else { throw LocalSpeechError.unavailable("Install the Parakeet model in Settings → Transcription.") }
+            let terms = SpeechVocabulary.boostTerms(preferences.vocabulary, context: meetingWords())
+            return SpeechVocabulary.guarded(try await parakeet.transcribe(url, vocabulary: terms), terms: terms).text
+        }
+        center.cleanup = { [weak self] text in
+            guard let self else { return text }
+            let cleaned = TextTools.clean(text, replacements: preferences.vocabulary, removeFillers: preferences.cleansFillers)
+            let words = SpeechVocabulary.terms(preferences.vocabulary) + (preferences.contextWords ? lexicon.confident(isKnownWord: Self.isKnownWord) : [])
+            return Lexicon.fixingSoundAlikes(cleaned, terms: words, isKnownWord: Self.isKnownWord).text
+        }
+        center.vocabulary = { [weak self] in self?.meetingWords() ?? [] }
+        center.prewarm = { [weak self] in self?.speech.localSpeech.parakeet.prewarm() }
+        center.microphoneUID = { [weak self] in self?.preferences.microphoneUID ?? "" }
+        center.isDictating = { [weak self] in
+            guard let self else { return false }
+            return speech.phase == .recording || commandListening
+        }
+        center.showMeeting = { [weak self] in self?.section = .meetings; self?.showWindow?() }
+        center.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
+        center.refreshDetection()
+        if center.calendarConnected { center.refreshCalendar() }
+    }
+
+    /// Names and words the meeting's speech model listens for.
+    private func meetingWords() -> [String] {
+        var words = meetings.live?.attendees.flatMap { $0.split(separator: " ").map(String.init) } ?? []
+        words += preferences.contextWords ? lexicon.top(40, isKnownWord: Self.isKnownWord) : []
+        var seen = Set<String>()
+        return words.filter { $0.count > 1 && seen.insert($0.lowercased()).inserted }.prefix(60).map { $0 }
+    }
+
+    private func configureCommands() {
+        let center = commands
+        center.startListening = { [weak self] in try await self?.startCommandListening() }
+        center.finishListening = { [weak self] in try await self?.finishCommandListening() ?? "" }
+        center.cancelListening = { [weak self] in await self?.cancelCommandListening() }
+        center.startMeeting = { [weak self] in self?.meetings.start(); self?.section = .meetings; self?.showWindow?() }
+        center.stopMeeting = { [weak self] in self?.meetings.stop() }
+        center.openMurmur = { [weak self] target in
+            guard let self else { return }
+            switch target {
+            case "settings": showWindow?(); showSettings = true
+            case "meetings": section = .meetings; showWindow?()
+            case "home": section = .home; showWindow?()
+            default: section = .transcripts; showWindow?()
+            }
+        }
+        center.flash = { [weak self] message, detail in self?.flashHUD(message, detail: detail) }
+        center.playSound = { [weak self] name in self?.playSound(name) }
+        center.liveTranscript = { [weak self] in self?.speech.liveText ?? "" }
+        center.typeText = { [weak self] words in
+            guard let self else { return "Murmur is closing." }
+            let destination = textInsertion.captureDestination()
+            // Insertion pastes from the clipboard: borrow it, and give back what was there once it worked.
+            let pasteboard = NSPasteboard.general
+            let borrowed = PasteboardSnapshot(pasteboard)
+            pasteboard.clearContents()
+            pasteboard.setString(words, forType: .string)
+            let written = pasteboard.changeCount
+            let result = await textInsertion.insert(words, into: destination)
+            if case .inserted = result, pasteboard.changeCount == written { borrowed?.restore(to: pasteboard) }
+            if case .inserted = result { return nil }
+            return destination == nil ? "Click into a text box first, then try again." : result.message
+        }
+        center.selectedTextProvider = { [weak self] in
+            guard let self else { return nil }
+            let destination = textInsertion.captureDestination()
+            return textInsertion.selectedText(in: destination)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        }
+    }
+
+    private func configureAssistant() {
+        let center = assistant
+        // Same listening as Commands: your words, heard on this Mac, never saved or pasted.
+        center.startListening = { [weak self] in try await self?.startCommandListening() }
+        center.finishListening = { [weak self] in try await self?.finishCommandListening() ?? "" }
+        center.cancelListening = { [weak self] in await self?.cancelCommandListening() }
+        center.liveTranscript = { [weak self] in self?.speech.liveText ?? "" }
+        center.inputLevel = { [weak self] in self?.speech.level ?? 0 }
+        center.runCommand = { [weak self] command, request in
+            guard let self else { return (command, "Murmur is closing.") }
+            return await commands.runForAssistant(command, request: request)
+        }
+        // Space + ↓: the on-Mac model plans what Murmur can do itself; the plan only runs
+        // when every step checks out against your words.
+        center.planWithModel = { [weak self, weak center] words in
+            // About half a second once the model is loaded; the longer limit only matters right after it starts.
+            guard let self, let center, let suggestion = await commands.plan(words, timeout: 3) else { return nil }
+            if !center.clicks, QuickPlan.presses(suggestion.action) { return nil }
+            return QuickPlan.trusted(suggestion.action, for: words) ? suggestion.action : nil
+        }
+        center.canFinishOnScreen = { [weak center] in center?.enabled ?? false }
+        center.warmPlanner = { [weak self] in self?.commands.warmPlanner() }
+        // Loaded now, so the first Space + ↓ doesn't wait for it.
+        commands.warmPlanner()
+        center.prelaunch = { app in
+            let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
+            NSWorkspace.shared.openApplication(at: app.url, configuration: configuration, completionHandler: nil)
+        }
+        center.runLocally = { [weak self] action, words, gate, onStep in
+            guard let self else { return ("", "Murmur is closing.") }
+            // Quitting, locking, Shortcuts and the Trash wait for your OK in the palette.
+            if QuickPlan.asksFirst(action) { commands.askToConfirm(action, heard: words); return nil }
+            return await commands.runPlanned(action, heard: words, gate: gate, onStep: onStep)
+        }
+        var destination: TextInsertion.Destination?
+        center.captureTypingDestination = { [weak self] in destination = self?.textInsertion.captureDestination() }
+        center.typeText = { [weak self] words in
+            guard let self else { return "Murmur is closing." }
+            guard let destination else { return "Click into a text box first, then ask again." }
+            let pasteboard = NSPasteboard.general
+            guard let borrowed = PasteboardSnapshot(pasteboard) else { return "The clipboard is too large to safely borrow. Copy the draft yourself." }
+            pasteboard.clearContents()
+            pasteboard.setString(words, forType: .string)
+            let written = pasteboard.changeCount
+            let result = await textInsertion.insert(words, into: destination)
+            if pasteboard.changeCount == written { borrowed.restore(to: pasteboard) }
+            if case .inserted = result { return nil }
+            return result.message
+        }
+        center.selectedText = { [weak self] in self?.commands.selectedTextProvider() }
+        center.playSound = { [weak self] name in self?.playSound(name) }
+        center.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
+    }
+
+    /// Records a spoken command with the same engine as dictation, without
+    /// adding it to your library or pasting it anywhere.
+    private func startCommandListening() async throws {
+        guard speech.phase == .idle, activeID == nil, !commandListening else { throw DictationError.unavailable }
+        commandListening = true
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Murmur-command-\(UUID().uuidString).m4a")
+        commandAudio = url
+        if preferences.recognitionEngine == .parakeet { speech.localSpeech.parakeet.prewarm() }
+        do {
+            commandStarting = true
+            defer { commandStarting = false }
+            try await speech.start(audioURL: url, localeID: preferences.locale, microphoneUID: preferences.microphoneUID,
+                                   recognitionEngine: preferences.recognitionEngine, vocabulary: preferences.vocabulary)
+            // Let go before the microphone was ready: turn it straight back off.
+            if !commandListening {
+                await speech.abort()
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            // Only your own words: hinting every installed app name made speech hear
+            // "slowed" as "Xcode". The parser already matches misheard app names.
+            speech.updateContext(Array(lexicon.top(20, isKnownWord: Self.isKnownWord).prefix(ContextVocabulary.maxTerms)))
+            playSound("start")
+        } catch {
+            commandListening = false; commandAudio = nil
+            throw error
+        }
+    }
+
+    private func finishCommandListening() async throws -> String {
+        guard commandListening else { return "" }
+        // Still starting: nothing was heard yet; startup sees this and stops the microphone.
+        if commandStarting {
+            commandListening = false; commandAudio = nil
+            return ""
+        }
+        playSound("finish")
+        defer {
+            commandListening = false
+            if let url = commandAudio { try? FileManager.default.removeItem(at: url) }
+            commandAudio = nil
+        }
+        let heard = try await speech.stop()
+        return TextTools.clean(heard, replacements: preferences.vocabulary, removeFillers: true)
+    }
+
+    private func cancelCommandListening() async {
+        guard commandListening else { return }
+        if commandStarting { commandListening = false; commandAudio = nil; return }
+        await speech.abort()
+        commandListening = false
+        if let url = commandAudio { try? FileManager.default.removeItem(at: url) }
+        commandAudio = nil
     }
 }

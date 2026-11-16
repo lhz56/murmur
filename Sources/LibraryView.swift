@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// Sidebar · transcript list · page.
+/// Sidebar · Home, or a list and its page.
 struct MainView: View {
     @ObservedObject var model: AppModel
     @FocusState private var searchFocused: Bool
@@ -11,17 +11,42 @@ struct MainView: View {
         // Filter once per render; rows, headers and keyboard navigation share it.
         let visible = model.visibleTranscripts
         HStack(spacing: 0) {
-            SidebarView(model: model, speech: model.speech).frame(width: 228)
+            SidebarView(model: model, speech: model.speech, meetings: model.meetings).frame(width: 212)
             Hairline(vertical: true)
-            listColumn(visible).frame(width: 312)
-            Hairline(vertical: true)
-            Group {
-                if let entry = model.selected {
-                    TranscriptPage(model: model, entry: entry).id(entry.id)
-                } else {
-                    EmptyPage(model: model)
+            switch model.section {
+            case .home:
+                HomeView(model: model, assistant: model.assistant, meetings: model.meetings)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .transcripts:
+                listColumn(visible).frame(width: 312)
+                Hairline(vertical: true)
+                Group {
+                    if let entry = model.selected {
+                        TranscriptPage(model: model, entry: entry).id(entry.id)
+                    } else {
+                        EmptyPage(model: model)
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .meetings:
+                // A live meeting gets the whole window: your notes and the transcript.
+                if model.meetings.selected?.status != .live {
+                    MeetingsColumn(center: model.meetings).frame(width: 312)
+                    Hairline(vertical: true)
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                Group {
+                    if let id = model.meetings.selectedID, model.meetings.meetings.contains(where: { $0.id == id && $0.deletedAt == nil }) {
+                        MeetingPage(center: model.meetings, id: id).id(id)
+                    } else {
+                        MeetingsHome(center: model.meetings)
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .commands:
+                CommandsPage(center: model.commands) { model.openCommands?() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .health:
+                MacHealthView(health: model.health, preferences: model.preferences, assistant: model.assistant, live: !model.isPreview)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .background(Palette.canvas)
         .foregroundStyle(Palette.ink)
@@ -34,7 +59,9 @@ struct MainView: View {
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.toast)
         .sheet(isPresented: $model.showSettings) {
-            SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck)
+            SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck,
+                         initialPane: model.settingsPane)
+                .onDisappear { model.settingsPane = .general }
         }
         .sheet(isPresented: $model.showStats) { StatsView(model: model, preferences: model.preferences) }
         .sheet(isPresented: $model.showOnboarding) {
@@ -45,7 +72,13 @@ struct MainView: View {
             Button("Open Settings") { model.errorMessage = nil; model.showSettings = true }
         } message: { Text(model.errorMessage ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshPermissions() }
-        .onReceive(NotificationCenter.default.publisher(for: .murmurSearch)) { _ in searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .murmurSearch)) { _ in
+            if model.section != .transcripts { model.section = .transcripts }
+            searchFocused = true
+        }
+        .alert("Meetings", isPresented: Binding(get: { model.meetings.errorMessage != nil }, set: { if !$0 { model.meetings.errorMessage = nil } })) {
+            Button("OK") { model.meetings.errorMessage = nil }
+        } message: { Text(model.meetings.errorMessage ?? "") }
     }
 
     // MARK: List column
@@ -54,7 +87,18 @@ struct MainView: View {
         VStack(spacing: 0) {
             HStack(spacing: 2) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(model.filter.rawValue).font(.system(size: 13, weight: .semibold))
+                    Menu {
+                        Picker("Show", selection: Binding(get: { model.filter }, set: { model.filter = $0; model.selectedID = nil })) {
+                            Text("All dictations").tag(LibraryFilter.all)
+                            Label("Favorites", systemImage: "star").tag(LibraryFilter.favorites)
+                            Label("Trash", systemImage: "trash").tag(LibraryFilter.trash)
+                        }.pickerStyle(.inline)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(model.filter == .all ? "Dictations" : model.filter.rawValue).font(.system(size: 13, weight: .semibold))
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.faint)
+                        }
+                    }.menuStyle(.button).buttonStyle(.plain).fixedSize().help("Show all, favorites or trash")
                     Text(caption(count: visible.count)).font(.system(size: 11)).foregroundStyle(Palette.muted)
                         .contentTransition(.numericText())
                 }
@@ -188,34 +232,34 @@ struct DaySection: Identifiable {
 struct SidebarView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var speech: DictationEngine
+    @ObservedObject var meetings: MeetingCenter
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
-                WaveMark(size: 20)
-                Text("Murmur").font(.system(size: 14, weight: .semibold))
-            }.padding(.horizontal, 10).padding(.top, 48).padding(.bottom, 14)
+                WaveMark(size: 22)
+                Text("Murmur").font(.system(size: 14.5, weight: .semibold))
+            }.padding(.horizontal, 10).padding(.top, 50).padding(.bottom, 18)
 
-            SidebarItem(title: speech.phase == .recording ? "Finish recording" : "New recording",
-                        symbol: speech.phase == .recording ? "stop.circle" : "mic", badge: "⌘N") { model.toggleRecording() }
-                .disabled(speech.phase.isBusy && speech.phase != .recording)
-            SidebarItem(title: "Search", symbol: "magnifyingglass", badge: "⌘F") {
-                NotificationCenter.default.post(name: .murmurSearch, object: nil)
+            SidebarItem(title: "Home", symbol: "house", selected: model.section == .home) { model.section = .home }
+            SidebarItem(title: "Dictations", symbol: "waveform", selected: model.section == .transcripts,
+                        badge: "\(model.savedCount)") {
+                if model.section != .transcripts { model.filter = .all; model.selectedID = nil; model.search = "" }
+                model.section = .transcripts
             }
-
-            Text("Library").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
-                .padding(.horizontal, 10).padding(.top, 20).padding(.bottom, 4)
-            ForEach(LibraryFilter.allCases, id: \.self) { filter in
-                SidebarItem(title: filter.rawValue, symbol: symbol(for: filter), selected: model.filter == filter,
-                            badge: filter == .all ? "\(model.savedCount)" : nil) {
-                    model.filter = filter; model.selectedID = nil; model.search = ""
-                }
+            SidebarItem(title: "Meetings", symbol: "person.2", selected: model.section == .meetings,
+                        badge: meetings.liveID != nil ? "●" : "\(meetings.visible.count)") {
+                model.section = .meetings
             }
+            SidebarItem(title: "Commands", symbol: "command", selected: model.section == .commands, badge: "Space ↓") { model.section = .commands }
+            HealthSidebarItem(health: model.health, selected: model.section == .health) { model.section = .health }
 
             Spacer(minLength: 16)
+            if meetings.liveID != nil {
+                MeetingDock(center: meetings) { model.section = .meetings; meetings.selectedID = meetings.liveID }.padding(.bottom, 8)
+            }
             RecordingDock(model: model, speech: speech).padding(.bottom, 8)
             Hairline().padding(.horizontal, 6).padding(.bottom, 6)
-            SidebarItem(title: "Insights", symbol: "chart.bar") { model.showStats = true }
             SidebarItem(title: "Settings", symbol: "gearshape", badge: "⌘,") { model.showSettings = true }
         }.padding(.horizontal, 8).padding(.bottom, 10)
             .frame(maxHeight: .infinity, alignment: .top)
@@ -247,7 +291,9 @@ struct SidebarItem: View {
                     .foregroundStyle(selected ? Palette.ink : Palette.muted)
                 Text(title).font(.system(size: 13, weight: .medium))
                 Spacer(minLength: 0)
-                if let badge {
+                if badge == "●" {
+                    LivePulse()
+                } else if let badge {
                     // Counts always show; shortcut hints appear on hover, like Notion.
                     Text(badge).font(.system(size: 11)).foregroundStyle(Palette.faint).monospacedDigit()
                         .opacity(hovered || selected || Int(badge) != nil ? 1 : 0)
@@ -286,15 +332,16 @@ struct RecordingDock: View {
     private var hints: some View {
         VStack(alignment: .leading, spacing: 7) {
             hintRow(model.preferences.fnBehavior == .hold && dictationKeys.count == 1 ? "Hold to dictate" : "Dictate", keys: dictationKeys)
-            hintRow("Paste last", keys: ["⌃", "⌥", "V"])
+            hintRow("Ask", keys: ["Space", "↑"])
+            hintRow("Do", keys: ["Space", "↓"])
         }.padding(.horizontal, 10).padding(.vertical, 4)
     }
 
     private func hintRow(_ title: String, keys: [String]) -> some View {
         HStack {
-            Text(title).font(.system(size: 12)).foregroundStyle(Palette.muted)
-            Spacer()
-            ShortcutKeys(keys: keys)
+            Text(title).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
+            Spacer(minLength: 4)
+            ShortcutKeys(keys: keys).fixedSize()
         }
     }
 
@@ -704,5 +751,31 @@ struct ToastView: View {
             .background(Color(hex: 0x2F2F2F), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
             .accessibilityElement(children: .combine)
+    }
+}
+
+/// The sidebar's live meeting status.
+struct MeetingDock: View {
+    @ObservedObject var center: MeetingCenter
+    var open: () -> Void
+    var body: some View {
+        if let live = center.live {
+            HStack(spacing: 10) {
+                LivePulse()
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(live.displayTitle).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text("Meeting · " + MeetingTranscript.clock(context.date.timeIntervalSince(live.createdAt)))
+                            .font(.system(size: 11)).foregroundStyle(Palette.muted).monospacedDigit()
+                    }
+                }
+                Spacer(minLength: 4)
+                LiveWaveform(level: max(center.micLevel, center.systemLevel), bars: 5, color: Palette.red, maxHeight: 16)
+                IconButton(symbol: "stop.fill", help: "End meeting", tint: Palette.ink) { center.stop() }
+            }.padding(.leading, 12).padding(.trailing, 4).padding(.vertical, 6)
+                .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.line, lineWidth: 1))
+                .contentShape(Rectangle()).onTapGesture(perform: open)
+        }
     }
 }

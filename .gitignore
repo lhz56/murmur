@@ -31,3 +31,6 @@ Benchmarks/recognition-results.json
 
 # Release archives
 dist/
+
+# Which identity this checkout signs with (Tools/SignApp.sh --use-developer-id)
+.murmur-signing
