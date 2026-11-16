@@ -4,24 +4,7 @@ import Contacts
 
 /// System Settings–style preferences: a category sidebar and native grouped forms.
 struct SettingsView: View {
-    enum Pane: String, CaseIterable, Identifiable {
-        case general = "General", shortcut = "Shortcut", microphone = "Microphone", transcription = "Transcription"
-        case insertion = "Insertion", recordings = "Recordings", vocabulary = "Vocabulary", snippets = "Snippets", styles = "Styles"
-        var id: Self { self }
-        var symbol: String {
-            switch self {
-            case .general: return "gearshape"
-            case .shortcut: return "keyboard"
-            case .microphone: return "mic"
-            case .transcription: return "waveform"
-            case .insertion: return "text.cursor"
-            case .recordings: return "externaldrive"
-            case .vocabulary: return "character.book.closed"
-            case .snippets: return "text.badge.plus"
-            case .styles: return "paintbrush"
-            }
-        }
-    }
+    typealias Pane = SettingsPane
 
     @ObservedObject var model: AppModel
     @ObservedObject var preferences: Preferences
@@ -80,7 +63,7 @@ struct SettingsView: View {
             Spacer()
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "lock.shield").font(.system(size: 12))
-                Text("Transcription runs on your Mac. Recordings never leave this device.")
+                Text("Dictation and meetings run on your Mac. Only Ask sends anything, and only when you ask.")
                     .font(.system(size: 11)).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
             }.foregroundStyle(Palette.muted).padding(.horizontal, 10).padding(.bottom, 14)
         }.padding(.horizontal, 8).frame(maxHeight: .infinity, alignment: .top).background(Palette.sidebar)
@@ -88,15 +71,27 @@ struct SettingsView: View {
 
     @ViewBuilder private var content: some View {
         switch pane {
-        case .general: generalPane
-        case .shortcut: shortcutPane
-        case .microphone: microphonePane
-        case .transcription: transcriptionPane
-        case .insertion: insertionPane
-        case .recordings: recordingsPane
-        case .vocabulary: vocabularyPane
-        case .snippets: snippetsPane
-        case .styles: stylesPane
+        case .general:
+            generalPane
+            heading("Recordings"); recordingsPane
+        case .dictation:
+            heading("Shortcut"); shortcutPane
+            heading("Microphone"); microphonePane
+            heading("Transcription"); transcriptionPane
+            heading("Typing into apps"); insertionPane
+        case .words:
+            heading("Vocabulary"); vocabularyPane
+            heading("Snippets"); snippetsPane
+            heading("Styles"); stylesPane
+        case .assistant: AssistantSettings(center: model.assistant)
+        }
+    }
+
+    /// A title over a group of sections, so one long page still reads as parts.
+    private func heading(_ title: String) -> some View {
+        Section {} header: {
+            Text(title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.ink).textCase(nil)
+                .padding(.top, 10)
         }
     }
 

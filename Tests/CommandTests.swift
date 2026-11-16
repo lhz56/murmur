@@ -10,6 +10,12 @@ import Foundation
         func top(_ text: String) -> CommandAction? { CommandParser.best(for: text, context: context)?.action }
         func app(_ name: String) -> CommandAction { .openApp(apps.first { $0.name == name }!) }
 
+        assert(!CommandAction.shortcut("Unknown automation").allowedFromAssistant)
+        assert(!CommandAction.system(.emptyTrash).allowedFromAssistant)
+        assert(!CommandAction.openURL(URL(string: "shortcuts://run-shortcut?name=Unknown")!).allowedFromAssistant)
+        assert(!CommandAction.sequence([.volume(.mute), .shortcut("Unknown")]).allowedFromAssistant)
+        assert(CommandAction.openURL(URL(string: "https://example.com")!).allowedFromAssistant)
+
         // Opening apps, however it's said or misheard.
         assert(top("open spotify") == app("Spotify"))
         assert(top("Can you open Spotify for me?") == app("Spotify"))
@@ -299,11 +305,26 @@ import Foundation
         fired = []
         assert(press(.down, true) == .pass && press(.space, true) == .swallow && press(.down, true, repeating: true) == .swallow)
         assert(press(.down, false) == .pass && fired == [true, false] && press(.space, false) == .swallow)
+        // Space + Up Arrow works the same way, and says which arrow it was.
+        keys = SpaceArrowChord(); fired = []
+        assert(press(.space, true) == .swallow && press(.up, true) == .swallow && fired == [true] && keys.arrow == .up)
+        assert(press(.down, true) == .pass, "the other arrow while held goes to the app")
+        assert(press(.up, false) == .swallow && fired == [true, false] && press(.space, false) == .swallow)
+        assert(press(.space, true) == .swallow && press(.down, true) == .swallow && keys.arrow == .down)
+        assert(press(.down, false) == .swallow && press(.space, false) == .swallow)
         // Key repeat off: half a second of Space alone sends the Space.
         assert(press(.space, true, at: 10) == .swallow && !keys.holdBackExpired(at: 10.2) && keys.holdBackExpired(at: 10.5))
         assert(press(.space, false) == .pass)
         // A click while Space is held back sends the Space first.
         assert(press(.space, true) == .swallow && press(.other, true) == .replaySpaceThen && press(.space, false) == .pass)
+        // Ask's proposed command must match what you said: music is fine, unnamed apps and sites aren't.
+        let spotify = AppEntry(name: "Spotify", path: "/Applications/Spotify.app")
+        assert(CommandAction.grounded(.play("Drake", on: .spotify), in: "I want to listen to Drake"))
+        assert(CommandAction.grounded(.openApp(spotify), in: "Hey, can you open Spotify?"))
+        assert(!CommandAction.grounded(.openApp(spotify), in: "open the thing"))
+        assert(CommandAction.grounded(.openURL(URL(string: "https://github.com/x")!), in: "open github"))
+        assert(!CommandAction.grounded(.openURL(URL(string: "https://malicious.example")!), in: "open the link"))
+        assert(!CommandAction.grounded(.shortcut("Delete Everything"), in: "run delete everything"))
         print("PASS command tests")
     }
 }

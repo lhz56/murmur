@@ -322,19 +322,59 @@ enum MeetingAgenda {
                            "join with google meet", "join by phone", "more phone numbers", "pin:", "dial-in", "join the meeting",
                            "need help?", "-::~:", "invitation from google calendar", "you are receiving this", "forwarding this invitation",
                            "to stop receiving", "reply for", "view all guest info"]
-        let text = notes.replacingOccurrences(of: "<[^>]+>", with: "\n", options: .regularExpression)
+        let text = withoutTags(notes)
             .replacingOccurrences(of: "&nbsp;", with: " ").replacingOccurrences(of: "&amp;", with: "&")
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { line in
             let lower = line.lowercased()
             guard line.count > 2, line.contains(where: \.isLetter) else { return false }
-            if lower.range(of: "https?://\\S+", options: .regularExpression).map({ lower[$0].count > line.count / 2 }) == true { return false }
-            if lower.range(of: "\\+?\\d[\\d ,#*-]{7,}", options: .regularExpression) != nil { return false }
+            if let link = firstLink(in: lower), link.count > line.count / 2 { return false }
+            if looksLikePhoneNumber(lower) { return false }
             if line.allSatisfy({ "─━-=_~:*.".contains($0) || $0 == " " }) { return false }
             if !line.contains(" "), line.contains("/"), line.contains(".") { return false }
             return !boilerplate.contains { lower.contains($0) }
         }
         let agenda = lines.joined(separator: "\n")
         return agenda.isEmpty ? nil : String(agenda.prefix(1_500))
+    }
+
+    /// HTML tags ("<br>", "<a href=…>") become line breaks.
+    static func withoutTags(_ text: String) -> String {
+        var result = ""
+        var rest = text[...]
+        while let open = rest.firstIndex(of: "<") {
+            result += rest[..<open]
+            let after = rest[rest.index(after: open)...]
+            if let close = after.firstIndex(of: ">"), close > after.startIndex {
+                result += "\n"
+                rest = after[after.index(after: close)...]
+            } else {
+                result += "<"
+                rest = after
+            }
+        }
+        return result + rest
+    }
+
+    /// The first "http://…" or "https://…", up to the next space.
+    static func firstLink(in text: String) -> Substring? {
+        let starts = ["http://", "https://"].compactMap { text.range(of: $0) }.filter { range in
+            range.upperBound < text.endIndex && !text[range.upperBound].isWhitespace
+        }
+        guard let start = starts.min(by: { $0.lowerBound < $1.lowerBound }) else { return nil }
+        let end = text[start.upperBound...].firstIndex(where: \.isWhitespace) ?? text.endIndex
+        return text[start.lowerBound..<end]
+    }
+
+    /// A digit followed by at least seven more digits, spaces, commas, #, * or dashes: a dial-in number.
+    static func looksLikePhoneNumber(_ text: String) -> Bool {
+        let characters = Array(text)
+        for (index, character) in characters.enumerated() where character.isASCII && character.isNumber {
+            var count = 0
+            var next = index + 1
+            while next < characters.count, (characters[next].isASCII && characters[next].isNumber) || " ,#*-".contains(characters[next]) { count += 1; next += 1 }
+            if count >= 7 { return true }
+        }
+        return false
     }
 }
 
@@ -344,10 +384,12 @@ enum MeetingAgenda {
 /// available: the most informative sentences, plus lines that sound like a
 /// decision or a commitment.
 enum BasicNotes {
-    private static let actionCue = try! NSRegularExpression(pattern:
-        "(?i)\\b(i'll|i will|we'll|we will|we need to|we should|i need to|you need to|can you|could you|please|let me|i'm going to|follow up|send (you|over|me)|todo|to-do|action item|by (monday|tuesday|wednesday|thursday|friday|tomorrow|next week|end of (the )?(day|week)))\\b")
-    private static let decisionCue = try! NSRegularExpression(pattern:
-        "(?i)\\b(we decided|decided to|let's go with|we'll go with|we agreed|agreed to|the plan is|we're going with|final decision|let's do)\\b")
+    private static let actionCue = ["i'll", "i will", "we'll", "we will", "we need to", "we should", "i need to", "you need to", "can you",
+                                    "could you", "please", "let me", "i'm going to", "follow up", "send you", "send over", "send me", "todo",
+                                    "to-do", "action item", "by monday", "by tuesday", "by wednesday", "by thursday", "by friday", "by tomorrow",
+                                    "by next week", "by end of day", "by end of the day", "by end of week", "by end of the week"]
+    private static let decisionCue = ["we decided", "decided to", "let's go with", "we'll go with", "we agreed", "agreed to", "the plan is",
+                                      "we're going with", "final decision", "let's do"]
     private static let stopwords: Set<String> = ["the", "a", "an", "and", "or", "but", "so", "to", "of", "in", "on", "at", "for", "is", "it", "i",
         "we", "you", "they", "he", "she", "that", "this", "with", "be", "was", "are", "like", "just", "yeah", "um", "uh", "know",
         "think", "really", "kind", "sort", "gonna", "going", "do", "have", "can", "what", "if", "there", "my", "your", "me", "okay", "ok",
@@ -386,8 +428,8 @@ enum BasicNotes {
         return result
     }
 
-    private static func matches(_ regex: NSRegularExpression, _ text: String) -> Bool {
-        regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    private static func matches(_ cues: [String], _ text: String) -> Bool {
+        TextScan.containsAny(cues, in: text)
     }
 
     static func list(_ items: [String]) -> String {

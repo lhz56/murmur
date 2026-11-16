@@ -1,23 +1,69 @@
 #!/bin/zsh
-# Keep one private local signing identity across Murmur rebuilds. This does not
-# grant privacy permissions, change trust settings, or create a distribution ID.
+# Signs Murmur in one of two ways:
+#   - Developer ID (Apple's distribution certificate), with the hardened runtime,
+#     for releases (notarized by Tools/Release.sh) and, once switched on with
+#     --use-developer-id, for everyday builds on a Mac that has the certificate.
+#   - A private local signing identity kept across rebuilds, for everyone else.
+# Neither grants privacy permissions or changes trust settings.
+#
+#   SignApp.sh [APP_PATH]          sign (the identity is chosen as described below)
+#   SignApp.sh --prepare           create/reuse the local identity only
+#   SignApp.sh --use-developer-id  sign this checkout's everyday builds with Developer ID from now on
+#   SignApp.sh --use-local         go back to the local identity
+#
+# Which identity: MURMUR_SIGNING=developer-id or local wins (Release.sh sets it);
+# otherwise the switch above; otherwise local. MURMUR_TIMESTAMP=1 adds Apple's secure
+# timestamp, which notarization requires.
 set -euo pipefail
 umask 077
 
 SIGNING_NAME='Murmur Local Signing (app.murmur.mac)'
 BUNDLE_ID='app.murmur.mac'
+TEAM_ID=${MURMUR_TEAM_ID:-ZX6ABY8QF9}
 PROJECT_DIR=${0:A:h:h}
 APP_DIR="$PROJECT_DIR/Murmur.app"
+SWITCH_FILE="$PROJECT_DIR/.murmur-signing"
+ENTITLEMENTS="$PROJECT_DIR/Murmur.entitlements"
 PREPARE_ONLY=false
+
+# The Developer ID Application identity for the team, by fingerprint, or nothing.
+developer_identity() {
+  /usr/bin/security find-identity -v -p codesigning 2>/dev/null |
+    /usr/bin/awk -v team="($TEAM_ID)" 'index($0, "\"Developer ID Application: ") && index($0, team "\"") { print $2; exit }'
+}
 
 if [[ ${1:-} == '--prepare' ]]; then
   PREPARE_ONLY=true
   shift
+elif [[ ${1:-} == '--use-developer-id' ]]; then
+  if [[ -z "$(developer_identity)" ]]; then
+    print -u2 "No \"Developer ID Application: … ($TEAM_ID)\" identity is in your keychain; staying on the local identity."
+    exit 4
+  fi
+  print developer-id >"$SWITCH_FILE"
+  print 'Everyday builds of this checkout now sign with Developer ID. Rebuild with ./build.sh.'
+  print 'The first launch asks for Murmur’s permissions again, once: Microphone, Accessibility,'
+  print 'Input Monitoring, Screen Recording, system audio, Calendar, Contacts, Reminders and Automation.'
+  exit 0
+elif [[ ${1:-} == '--use-local' ]]; then
+  /bin/rm -f -- "$SWITCH_FILE"
+  print 'Everyday builds of this checkout sign with the local identity again. Rebuild with ./build.sh.'
+  exit 0
 elif [[ ${1:-} == '--help' || ${1:-} == '-h' ]]; then
-  print 'Usage: SignApp.sh [APP_PATH] | SignApp.sh --prepare'
-  print 'Creates/reuses a private local signing identity in your login keychain.'
+  print 'Usage: SignApp.sh [APP_PATH] | --prepare | --use-developer-id | --use-local'
+  print 'Signs with Developer ID when chosen and available, else a private local identity in your login keychain.'
   print 'Quit Murmur before signing. A Keychain access dialog may require approval.'
   exit 0
+fi
+
+MODE=${MURMUR_SIGNING:-}
+if [[ -z "$MODE" ]]; then
+  MODE=local
+  [[ -f "$SWITCH_FILE" && "$(<"$SWITCH_FILE")" == developer-id ]] && MODE=developer-id
+fi
+if [[ "$MODE" != developer-id && "$MODE" != local ]]; then
+  print -u2 "MURMUR_SIGNING must be developer-id or local, not $MODE."
+  exit 2
 fi
 if (( $# > 1 )) || { $PREPARE_ONLY && (( $# > 0 )); }; then
   print -u2 'Usage: SignApp.sh [APP_PATH] | SignApp.sh --prepare'
@@ -36,10 +82,52 @@ if ! $PREPARE_ONLY; then
     print -u2 "Refusing to sign an application other than $BUNDLE_ID."
     exit 2
   fi
-  if /usr/bin/pgrep -x Murmur >/dev/null 2>&1; then
+  # Building somewhere else (a release in dist/) doesn't touch the running copy.
+  if [[ ${MURMUR_ALLOW_RUNNING:-} != 1 ]] && /usr/bin/pgrep -x Murmur >/dev/null 2>&1; then
     print -u2 'Quit Murmur before signing. The running application was not changed.'
     exit 3
   fi
+fi
+
+if [[ "$MODE" == developer-id ]] && ! $PREPARE_ONLY; then
+  DEVELOPER_HASH=$(developer_identity)
+  if [[ -z "$DEVELOPER_HASH" ]]; then
+    if [[ -n ${MURMUR_SIGNING:-} ]]; then
+      print -u2 "No \"Developer ID Application: … ($TEAM_ID)\" identity is in your keychain; nothing was signed."
+      exit 5
+    fi
+    print -u2 'The Developer ID certificate is missing; signing with the local identity instead.'
+    MODE=local
+  fi
+fi
+
+if [[ "$MODE" == developer-id ]] && ! $PREPARE_ONLY; then
+  [[ -f "$ENTITLEMENTS" ]] || { print -u2 "Missing $ENTITLEMENTS"; exit 2; }
+  TIMESTAMP=(--timestamp=none)
+  [[ ${MURMUR_TIMESTAMP:-} == 1 ]] && TIMESTAMP=(--timestamp)
+  sign_developer() {
+    if ! /usr/bin/codesign --force --options runtime "${TIMESTAMP[@]}" --sign "$DEVELOPER_HASH" "$@"; then
+      print -u2 'Developer ID signing failed. If macOS showed a Keychain dialog, allow codesign, then rerun.'
+      exit 6
+    fi
+  }
+  # Inside out: every helper and library first (notarization refuses ad-hoc or
+  # unsigned code anywhere in the bundle), then the app around them.
+  # The helpers never record audio themselves, so they need no entitlements.
+  MAIN_EXECUTABLE="$APP_DIR/Contents/MacOS/Murmur"
+  /usr/bin/find "$APP_DIR/Contents" -type f ! -path "$MAIN_EXECUTABLE" -print0 |
+    while IFS= read -r -d '' CODE_FILE; do
+      if /usr/bin/file -b "$CODE_FILE" | /usr/bin/grep -q 'Mach-O'; then
+        sign_developer --identifier "$BUNDLE_ID.${${CODE_FILE:t}%%.*}" "$CODE_FILE"
+      fi
+    done
+  # The default designated requirement: this bundle ID, signed by this team's
+  # Developer ID, so permissions carry over from one build to the next.
+  sign_developer --identifier "$BUNDLE_ID" --entitlements "$ENTITLEMENTS" "$APP_DIR"
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+  /usr/bin/codesign --verify --test-requirement "=anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM_ID\"" "$APP_DIR"
+  print "Signed with Developer ID ($TEAM_ID), hardened runtime$([[ ${MURMUR_TIMESTAMP:-} == 1 ]] && print -n ', secure timestamp'): $APP_DIR"
+  exit 0
 fi
 
 # Use the existing login keychain, never the System keychain or a trust override.

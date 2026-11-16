@@ -112,13 +112,34 @@ enum SiteBook {
         }
     }
 
+    /// Web addresses written in a file: "recallr.app", "api.workloom.live". Runs of
+    /// letters, digits, dashes and dots, cut at the last part that's a known ending.
+    nonisolated static func domains(in text: String) -> [String] {
+        let endings: Set<String> = ["com", "app", "live", "io", "dev", "ai", "co", "net", "org", "so", "xyz", "me", "site", "page", "tech", "sh", "gg", "studio", "tv"]
+        func isPart(_ character: Character) -> Bool { character.isASCII && (character.isLetter || character.isNumber || character == "-" || character == ".") }
+        var found: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard isPart(text[index]) else { index = text.index(after: index); continue }
+            let start = index
+            while index < text.endIndex, isPart(text[index]) { index = text.index(after: index) }
+            // Not glued to a word ("foo_bar.com").
+            if start > text.startIndex, text[text.index(before: start)] == "_" { continue }
+            if index < text.endIndex, text[index] == "_" { continue }
+            var labels = text[start..<index].split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+            while labels.first?.isEmpty == true { labels.removeFirst() }
+            guard let last = labels.indices.dropFirst().last(where: { endings.contains(labels[$0].lowercased()) }),
+                  labels[..<last].allSatisfy({ !$0.isEmpty }) else { continue }
+            found.append(labels[...last].joined(separator: "."))
+        }
+        return found
+    }
+
     /// Domains each project's own files mention: docs, config and code, never
     /// secrets (.env files are skipped) and never dependencies.
     nonisolated static func projects(_ folders: [String: String], appNames: Set<String>) -> [String: [String: Int]] {
         let skipped: Set<String> = ["node_modules", "dist", "build", ".build", ".git", "Pods", "DerivedData", ".next", "vendor", "target", "venv", ".venv"]
         let kinds: Set<String> = ["md", "json", "ts", "tsx", "js", "mjs", "jsx", "html", "toml", "yml", "yaml", "txt", "swift", "py", "sql", "astro", "vue", "svelte"]
-        let pattern = try! NSRegularExpression(pattern: "\\b((?:[a-z0-9-]+\\.)+(?:com|app|live|io|dev|ai|co|net|org|so|xyz|me|site|page|tech|sh|gg|studio|tv))\\b",
-                                               options: [.caseInsensitive])
         var result: [String: [String: Int]] = [:]
         // Personal folders are never opened (macOS also guards several of them), and only
         // real code projects are read: a folder with a repository or a package file.
@@ -143,9 +164,8 @@ enum SiteBook {
                       let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
                 files += 1
                 if files > 800 { break }
-                for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                    guard let range = Range(match.range(at: 1), in: text) else { continue }
-                    var host = text[range].lowercased()
+                for found in domains(in: text) {
+                    var host = found.lowercased()
                     if host.hasPrefix("www.") { host.removeFirst(4) }
                     // "Murmur.app" is an app's file name, not a website.
                     if host.hasSuffix(".app"), appNames.contains(String(host.dropLast(4))) { continue }

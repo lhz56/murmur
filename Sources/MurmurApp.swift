@@ -90,6 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var palette: KeyPanel!
     private var promptPanel: FloatingPanel!
     private var pillPanel: FloatingPanel!
+    private var askPanel: FloatingPanel!
+    private let pointer = PointerOverlay()
+    /// This press finished a hands-free question, so its release does nothing more.
+    private var askPressSent = false
     private var commandKeyDownAt: TimeInterval?
     private var commandHoldTask: Task<Void, Never>?
     private var liveTextTimer: Timer?
@@ -104,6 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Clicking "Notes ready" opens that meeting.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let identifier = response.notification.request.identifier
+        if identifier == "mac-health" {
+            await MainActor.run {
+                model.section = .health
+                openLibrary()
+            }
+            return
+        }
         guard identifier.hasPrefix("meeting-"), let id = UUID(uuidString: String(identifier.dropFirst(8))) else { return }
         await MainActor.run {
             model.meetings.selectedID = id
@@ -123,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         makeHUD()
         makePalette()
         makeMeetingPanels()
+        makeAskPanel()
         makeStatusItem()
         model.showWindow = { [weak self] in self?.openLibrary() }
         UNUserNotificationCenter.current().delegate = self
@@ -140,7 +152,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         shortcut.onToggle = { [weak self] in self?.model.toggleRecording() }
         commandChord.onChord = { [weak self] down in self?.commandKey(down) }
+        // Space + ↓ is the one key for asking and doing; Space + ↑ does the same, for old habits.
+        commandChord.onAskChord = { [weak self] down in self?.commandKey(down) }
         model.openCommands = { [weak self] in self?.showPalette() }
+        model.askNow = { [weak self] in self?.askAboutScreen() }
         model.commands.close = { [weak self] in self?.hidePalette() }
         model.commands.reopen = { [weak self] in self?.showPalette(fresh: false) }
         model.meetings.onDetectedChanged = { [weak self] call in self?.updatePrompt(call) }
@@ -148,7 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.updatePill(live)
             self?.updateStatusItem(recording: live || self?.model.speech.phase == .recording)
         }
-        shortcut.onEscape = { [weak self] in self?.model.cancelRecording() }
+        shortcut.onEscape = { [weak self] in
+            guard let self else { return }
+            if model.assistant.isActive { model.assistant.cancel() } else { model.cancelRecording() }
+        }
         shortcut.onPasteLast = { [weak self] in self?.model.pasteLastTranscript() }
         shortcut.onEdit = { [weak self] in self?.model.toggleEditRecording() }
         shortcut.onTypeLast = { [weak self] in self?.model.typeLastTranscript() }
@@ -198,6 +216,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if !model.isPreview { model.cleanUpOldAudio() }
         if !model.isPreview, model.preferences.checkForUpdates { Task { await model.updates.check() } }
+        if !model.isPreview {
+            model.health.enabled = { [weak self] in self?.model.preferences.macHealth ?? false }
+            model.health.onDanger = { [weak self] reading in self?.model.flashHealthWarning(reading) }
+            model.health.start()
+        }
         if !model.isPreview, shortcut.register() != noErr {
             model.errorMessage = "Control Option Space is already used by another app. Close that app to use Murmur’s global shortcut. Recording from Murmur still works."
         }
@@ -207,6 +230,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if !launchedAtLogin || model.showOnboarding { openLibrary() }
         if model.isPreview && CommandLine.arguments.contains("--island-preview") { previewIsland() }
+        if model.isPreview && CommandLine.arguments.contains("--pointer-preview") { previewPointer() }
+        // Testing only: run typed requests through Space + ↓ and log each step. Off unless started with this flag.
+        if CommandLine.arguments.contains("--debug-requests") {
+            RequestTrace.enabled = true
+            DistributedNotificationCenter.default().addObserver(forName: .init("app.murmur.debug.request"), object: nil, queue: .main) { [weak self] note in
+                guard let text = note.object as? String else { return }
+                MainActor.assumeIsolated { self?.model.assistant.debugRun(text) }
+            }
+            DistributedNotificationCenter.default().addObserver(forName: .init("app.murmur.debug.survey"), object: nil, queue: .main) { note in
+                guard let name = note.object as? String else { return }
+                Task { @MainActor in RequestTrace.log(await ScreenClick.survey(appNamed: name)) }
+            }
+        }
         if CommandLine.arguments.contains("--smoke-test") {
             print("MURMUR_SMOKE_OK: window=\(window.frame.width)x\(window.frame.height), history=\(model.transcripts.count), root=\(model.storage.root.path)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
@@ -227,6 +263,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         window.setFrameAutosaveName(model.isPreview ? "MurmurPreview" : "MurmurMain")
         window.center()
+    }
+
+    /// Plays pointing and clicking on screen, for checking how it looks and feels.
+    private func previewPointer() {
+        Task {
+            guard let frame = NSScreen.main?.frame else { return }
+            func spot(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: frame.minX + frame.width * x, y: frame.minY + frame.height * y) }
+            for _ in 0..<6 {
+                try? await Task.sleep(for: .milliseconds(600))
+                pointer.show([(spot(0.62, 0.7), "Bluetooth")])
+                try? await Task.sleep(for: .milliseconds(1300))
+                pointer.press(at: spot(0.62, 0.7), ok: true)
+                try? await Task.sleep(for: .milliseconds(1500))
+                pointer.clear()
+                try? await Task.sleep(for: .milliseconds(700))
+                pointer.show([(spot(0.2, 0.8), "Privacy & Security"), (spot(0.5, 0.45), "FileVault"), (spot(0.8, 0.3), "Turn On…")])
+                try? await Task.sleep(for: .milliseconds(3200))
+                pointer.press(at: spot(0.8, 0.3), ok: false)
+                try? await Task.sleep(for: .milliseconds(1400))
+                pointer.clear()
+            }
+        }
     }
 
     private func previewIsland() {
@@ -338,7 +396,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Tap Space + Down Arrow to type; hold them to speak and let go to run.
+    /// Space + ↓: hold and talk. Ask about the screen, or say what to do ("open T3 Code,
+    /// open the thread called launch notes and type ship it"): what Murmur can do itself
+    /// runs at once on this Mac, the rest goes to Ask. A quick tap opens the palette to type.
     private func commandKey(_ down: Bool) {
+        let assistant = model.assistant
+        guard assistant.enabled else { paletteKey(down); return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if down {
+            guard commandKeyDownAt == nil else { return }
+            commandKeyDownAt = now
+            // Murmur was already listening for a follow-up: now you're holding the key.
+            if assistant.isListening, assistant.autoListening { assistant.takeOver(); return }
+            if assistant.isListening, assistant.handsFree { assistant.end(); askPressSent = true; return }
+            pendingToggleClose = palette.isVisible
+            // Dictating, or a meeting has the microphone: one job at a time.
+            guard model.speech.phase == .idle, model.activeID == nil, !model.commandListening else { return }
+            assistant.begin(showAfter: 0.18)
+        } else {
+            let held = commandKeyDownAt.map { now - $0 } ?? 0
+            commandKeyDownAt = nil
+            if askPressSent { askPressSent = false; return }
+            let toggling = pendingToggleClose
+            pendingToggleClose = false
+            if held < 0.2 {
+                // A tap: open the palette to type (or close it, if it was open).
+                if assistant.isListening { assistant.cancel() }
+                if toggling { hidePalette() } else { showPalette() }
+                return
+            }
+            if palette.isVisible { hidePalette() }
+            if assistant.isListening { assistant.end() }
+        }
+    }
+
+    /// Space + ↓ when Ask is turned off: the Commands palette, as before.
+    private func paletteKey(_ down: Bool) {
         let center = model.commands
         if down {
             guard commandKeyDownAt == nil else { return }
@@ -364,6 +457,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
     private var pendingToggleClose = false
+
+    // MARK: Ask
+
+    private func makeAskPanel() {
+        let size = AssistantBubble.size
+        askPanel = FloatingPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        askPanel.isFloatingPanel = true; askPanel.level = .floating
+        askPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        askPanel.backgroundColor = .clear; askPanel.isOpaque = false; askPanel.hasShadow = false
+        askPanel.hidesOnDeactivate = false
+        // It rides next to your cursor, so clicks go straight through to what's under it.
+        askPanel.ignoresMouseEvents = true
+        askPanel.contentView = NSHostingView(rootView: AssistantBubble(center: model.assistant, speech: model.speech, placement: askPlacement))
+        let assistant = model.assistant
+        assistant.show = { [weak self] in self?.showAskPanel() }
+        assistant.hide = { [weak self] in
+            guard let self else { return }
+            askPanel.orderOut(nil)
+            askFollow?.invalidate(); askFollow = nil
+            if model.speech.phase != .recording { shortcut.setRecording(false) }
+        }
+        assistant.pointAt = { [weak self] points in self?.pointer.show(points) }
+        assistant.clearPoints = { [weak self] in self?.pointer.clear() }
+        assistant.showClick = { [weak self] point, ok in self?.pointer.press(at: point, ok: ok) }
+        model.commands.pressed = { [weak self] point in self?.pointer.press(at: point, ok: true) }
+    }
+
+    private func showAskPanel() {
+        placeAskPanel()
+        askPanel.orderFrontRegardless()
+        if askFollow == nil {
+            // Glued to the cursor, every frame.
+            let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.placeAskPanel() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            askFollow = timer
+        }
+        // Esc closes it, like the recording pill.
+        shortcut.setRecording(true)
+    }
+
+    private var askFollow: Timer?
+    private let askPlacement = CompanionPlacement()
+    private var askMouse: NSPoint?
+
+    /// Just right of and below the cursor, flipping to the other side near an edge.
+    private func placeAskPanel() {
+        let mouse = NSEvent.mouseLocation
+        guard mouse != askMouse || !askPanel.isVisible else { return }
+        askMouse = mouse
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }) ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame, size = AssistantBubble.size
+        let gapX: CGFloat = 16, gapY: CGFloat = 14
+        // Room for a typical card (not the whole window) decides the side; it only flips back with some slack.
+        let card = CGSize(width: 300, height: 150)
+        let right = askPlacement.right ? mouse.x + gapX + card.width <= visible.maxX : mouse.x + gapX + card.width + 40 <= visible.maxX
+        let below = askPlacement.below ? mouse.y - gapY - card.height >= visible.minY : mouse.y - gapY - card.height - 30 >= visible.minY
+        if askPlacement.right != right { askPlacement.right = right }
+        if askPlacement.below != below { askPlacement.below = below }
+        var origin = NSPoint(x: right ? mouse.x + gapX : mouse.x - gapX - size.width,
+                             y: below ? mouse.y - gapY - size.height : mouse.y + gapY)
+        origin.x = min(max(origin.x, visible.minX - (right ? 0 : size.width - card.width)), visible.maxX - (right ? card.width : size.width))
+        origin.y = min(max(origin.y, visible.minY - (below ? size.height - card.height : 0)), visible.maxY - (below ? size.height : card.height))
+        askPanel.setFrameOrigin(origin)
+    }
+
+    @objc private func askAboutScreen() {
+        let assistant = model.assistant
+        if assistant.isListening { assistant.end(); return }
+        guard assistant.enabled else { model.settingsPane = .assistant; openSettings(); return }
+        guard model.speech.phase == .idle, model.activeID == nil, !model.commandListening else { return }
+        assistant.begin(handsFree: true)
+    }
 
     // MARK: Meeting panels
 
@@ -447,9 +614,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = item("Type Last Transcript", last == nil || busy ? nil : #selector(typeLastTranscript), key: "t", modifiers: [.control, .option])
         _ = item("Edit Selection by Voice", busy ? nil : #selector(editSelectionByVoice), key: "e", modifiers: [.control, .option])
         menu.addItem(.separator())
+        _ = item(model.assistant.isListening ? "Send Question" : "Ask About Your Screen", #selector(askAboutScreen))
         _ = item("Commands…", #selector(openCommands), key: " ", modifiers: [.option])
         _ = item(model.meetings.liveID == nil ? "Take Meeting Notes" : "End Meeting and Write Notes", #selector(toggleMeeting))
         menu.addItem(.separator())
+        if model.health.reading.level == .danger {
+            _ = item("⚠︎ \(model.health.reading.title)…", #selector(openMacHealth))
+            menu.addItem(.separator())
+        }
         if let update = model.updates.available {
             _ = item("Update Available: Murmur \(update.version)…", #selector(openUpdate))
         }
@@ -500,6 +672,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc func openLibrary() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc private func openSettings() { openLibrary(); model.showSettings = true }
+    @objc private func openHome() { model.section = .home; openLibrary() }
+    @objc private func openMacHealth() { model.section = .health; openLibrary() }
     @objc private func toggleRecording() { model.toggleRecording() }
     @objc private func openCommands() { showPalette() }
     @objc private func toggleMeeting() {
@@ -520,6 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         ducking?.restoreNow()
+        model.assistant.shutDown()
         if model.speech.phase.isBusy || model.activeID != nil || model.commandListening || model.meetings.hasUnsavedAudio {
             Task { await model.prepareToQuit(); shortcut.unregister(); fnShortcut.stop(); commandChord.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
             return .terminateLater

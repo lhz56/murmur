@@ -87,6 +87,14 @@ final class CommandCenter: ObservableObject {
     var close: (() -> Void)?
     /// Shows the palette again, e.g. to ask which site you meant.
     var reopen: (() -> Void)?
+    /// Murmur pressed something by name, here (AppKit coordinates): the pointer shows it.
+    var pressed: ((CGPoint) -> Void)?
+    /// The app a plan opened: its clicks happen there.
+    private var pressTarget: pid_t?
+    /// Waits for the preview before the first step that clicks or types; false = stopped.
+    private var gate: (() async -> Bool)?
+    /// Hears each step of a planned sequence as it starts (Space + ↓ shows them ticking off).
+    private var stepStarted: ((Int) -> Void)?
     var flash: ((String, String?) -> Void)?
     var playSound: ((String) -> Void)?
     var selectedTextProvider: () -> String? = { nil }
@@ -223,19 +231,22 @@ final class CommandCenter: ObservableObject {
 
     // MARK: Voice
 
+    /// Loads the small model while you talk, in case the request needs it.
+    func warmPlanner() {
+        guard useLocalAI else { return }
+        let names = apps.map(\.name), service = music
+        Task.detached(priority: .utility) {
+            await LocalLLM.preload()
+            // Reading the instructions and examples once now means the real request only reads your words.
+            guard case .ollama(let model) = (await Writer.forCommands()).kind else { return }
+            _ = await StepPlanner.calls(for: "open notes", apps: names, music: service, model: model, timeout: 20)
+        }
+    }
+
     func beginListening() {
         guard phase != .listening, let startListening else { return }
         phase = .listening; liveText = ""; query = ""
-        // Load the small model while you talk, in case the request needs it.
-        if useLocalAI {
-            let names = apps.map(\.name), service = music
-            Task.detached(priority: .utility) {
-                await LocalLLM.preload()
-                // Reading the instructions and examples once now means the real request only reads your words.
-                guard case .ollama(let model) = (await Writer.forCommands()).kind else { return }
-                _ = await CommandPlanner.calls(for: "open notes", apps: names, music: service, model: model)
-            }
-        }
+        warmPlanner()
         Task {
             do { try await startListening() }
             catch { phase = .failed(error.localizedDescription) }
@@ -270,6 +281,59 @@ final class CommandCenter: ObservableObject {
                 await runSpoken(heard, planned: planned)
                 if !same { early?.cancel() }
             } catch { early?.cancel(); phase = .failed(error.localizedDescription) }
+        }
+    }
+
+    /// Something you said through Ask can't be undone (empty the Trash): the palette asks first.
+    func askToConfirm(_ action: CommandAction, heard: String) {
+        query = heard
+        pendingConfirmation = CommandParser.best(for: heard, context: voiceContext)
+            ?? CommandSuggestion(title: heard.capitalizedFirst, subtitle: "", icon: .symbol("questionmark", tint: .neutral), action: action, confidence: 1)
+        phase = .idle
+        reopen?()
+    }
+
+    /// Runs a plan from Space + ↓ (planned on this Mac), and keeps it in your history.
+    /// `gate` holds back the first step that clicks or types (the plan's preview, so
+    /// Esc can stop it); opening apps and pages before it starts right away.
+    func runPlanned(_ action: CommandAction, heard: String, gate: (() async -> Bool)? = nil,
+                    onStep: ((Int) -> Void)? = nil) async -> (title: String, problem: String?) {
+        self.gate = gate
+        stepStarted = onStep
+        defer { self.gate = nil; stepStarted = nil }
+        var problem: String?
+        if case .sequence = action {} else if let gate, QuickPlan.needsPreview(action), !(await gate()) {
+            problem = "Stopped"
+        }
+        self.gate = (problem == nil) ? self.gate : nil
+        if problem == nil { problem = await perform(action) }
+        askedForChoice = false
+        let title = Self.title(for: action)
+        record(text: heard, title: title, ok: problem == nil)
+        if case .openApp(let app) = action { usage[app.name, default: 0] += 1; defaults.set(usage, forKey: "commandUsage") }
+        return (title, problem)
+    }
+
+    /// A short past-tense summary: "Opened T3 Code · pressed “Launch notes” · typed it".
+    static func title(for action: CommandAction) -> String {
+        switch action {
+        case .openApp(let app): return "Opened \(app.name)"
+        case .press(let name): return "Pressed “\(name)”"
+        case .type(let words, _): return words.count > 28 ? "Typed it" : "Typed “\(words)”"
+        case .sequence(let steps): return steps.map(title(for:)).joined(separator: " · ")
+        case .inBrowser(let inner, _): return title(for: inner)
+        case .timer(let seconds, _): return "Timer set for \(seconds >= 60 ? "\(seconds / 60) min" : "\(seconds) s")"
+        case .play(let query, _): return "Playing \(query)"
+        case .media(let key): return key == .playPause ? "Play/pause" : key == .next ? "Next track" : "Previous track"
+        case .volume: return "Volume changed"
+        case .openURL, .system:
+            let step = QuickPlan.describe(action).first ?? "Done"
+            for (present, past) in [("Open ", "Opened "), ("Search ", "Searched "), ("Directions ", "Showing directions ")] where step.hasPrefix(present) {
+                return past + step.dropFirst(present.count)
+            }
+            return step
+        case .openSite(let name): return "Opened \(name)"
+        default: return "Done"
         }
     }
 
@@ -314,14 +378,49 @@ final class CommandCenter: ObservableObject {
         run(best, text: heard)
     }
 
+    /// A command Ask chose ("open Spotify and play Drake"), run without the palette.
+    /// Your own words win when Commands understands them; otherwise Ask's version
+    /// runs only if it matches what you said (a site or app you never mentioned is
+    /// never opened because something on screen said so).
+    /// Returns what was done, and the problem if it didn't work.
+    func runForAssistant(_ command: String, request: String) async -> (title: String, problem: String?) {
+        func sure(_ text: String) -> CommandSuggestion? {
+            CommandParser.best(for: text, context: voiceContext).flatMap { CommandParser.isSure($0, for: text) ? $0 : nil }
+        }
+        let best: CommandSuggestion
+        if let own = sure(request) { best = own }
+        else if let proposed = sure(command), CommandAction.grounded(proposed.action, in: request) { best = proposed }
+        else { return (command, "Didn’t run “\(command)”: say it in your own words") }
+        // Quitting apps, locking the screen and the like wait for you to say so yourself.
+        if !best.action.allowedFromAssistant || best.action.needsConfirmation { return (best.title, "“\(best.title)” needs your OK: use Space + ↓") }
+        let problem = await perform(best.action)
+        askedForChoice = false
+        record(text: request, title: best.title, ok: problem == nil)
+        if case .openApp(let app) = best.action { usage[app.name, default: 0] += 1; defaults.set(usage, forKey: "commandUsage") }
+        return (Self.pastTense(best.title), problem)
+    }
+
+    /// The first ID of exactly `length` letters and digits (plus `extra`) right after `marker` in a page.
+    nonisolated static func id(in page: String, after marker: String, length: Int, extra: String) -> String? {
+        var rest = page[...]
+        while let found = rest.range(of: marker) {
+            let candidate = rest[found.upperBound...].prefix(length + 1)
+            let id = candidate.prefix(length)
+            let allowed = { (c: Character) in c.isASCII && (c.isLetter || c.isNumber || extra.contains(c)) }
+            if id.count == length, id.allSatisfy(allowed), candidate.count == length || !allowed(candidate.last!) { return String(id) }
+            rest = rest[found.upperBound...]
+        }
+        return nil
+    }
+
     /// The local model's plan for a request in plain language, as one command.
-    func plan(_ request: String) async -> CommandSuggestion? {
+    func plan(_ request: String, timeout: TimeInterval = 6) async -> CommandSuggestion? {
         guard useLocalAI, !request.isEmpty else { return nil }
         // A small, quick model; a big one only if it's already loaded. Never a cold 5 GB load for one command.
         guard case .ollama(let model) = (await Writer.forCommands()).kind, !Task.isCancelled else { return nil }
         let started = Date()
-        guard let calls = await CommandPlanner.calls(for: request, apps: apps.map(\.name), music: music, model: model), !calls.isEmpty,
-              let suggestion = CommandPlanner.action(for: calls, request: request, context: voiceContext) else {
+        guard let calls = await StepPlanner.calls(for: request, apps: apps.map(\.name), music: music, model: model, timeout: timeout), !calls.isEmpty,
+              let suggestion = QuickPlan.suggestion(calls, request: request, context: voiceContext) else {
             log.notice("The local model had no plan")
             return nil
         }
@@ -393,13 +492,23 @@ final class CommandCenter: ObservableObject {
 
     /// Performs an action; returns a problem to show, or nil when it worked.
     func perform(_ action: CommandAction) async -> String? {
+        guard !Task.isCancelled else { return "Cancelled" }
         switch action {
         case .openApp(let app):
             let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
             do {
                 let running = try await NSWorkspace.shared.openApplication(at: app.url, configuration: configuration)
                 // Done means it's actually in front, so the next step lands in the right place.
-                await Self.waitUntilFront(running, timeout: 6)
+                await Self.waitUntilFront(running, timeout: 4)
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier != running.processIdentifier {
+                    running.activate()
+                    await Self.waitUntilFront(running, timeout: 3)
+                }
+                pressTarget = running.processIdentifier
+                // Never carry on in whatever app happens to be in front instead.
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == running.processIdentifier else {
+                    return "\(app.name) didn’t come to the front, so Murmur stopped there."
+                }
                 return nil
             } catch { return "Couldn’t open \(app.name)." }
         case .openSite(let name):
@@ -459,8 +568,21 @@ final class CommandCenter: ObservableObject {
         case .murmur(let target):
             openMurmur?(target); return nil
         case .sequence(let steps):
+            pressTarget = nil
+            defer { pressTarget = nil }
+            let report = stepStarted
+            stepStarted = nil
+            defer { stepStarted = report }
             for (index, step) in steps.enumerated() {
-                if let problem = await perform(step) { return problem }
+                report?(index)
+                if let waiting = gate, QuickPlan.needsPreview(step) {
+                    gate = nil
+                    guard await waiting() else { return "Stopped" }
+                }
+                let stepStarted = Date()
+                let problem = await perform(step)
+                RequestTrace.log("  step \(index + 1) \(QuickPlan.describe(step).joined()) — \(problem ?? "ok") (\(RequestTrace.ms(since: stepStarted)))")
+                if let problem { return problem }
                 if askedForChoice {
                     // Wait for your pick; the steps after it run once you've chosen.
                     let rest = Array(steps[(index + 1)...])
@@ -477,15 +599,39 @@ final class CommandCenter: ObservableObject {
                 guard index < steps.count - 1 else { break }
                 // Each step waits for the last one to land, not a fixed delay:
                 // apps are already confirmed in front; a page needs its browser in front.
-                if case .openURL(let url) = step, url.scheme?.hasPrefix("http") == true,
-                   let browser = BrowserLaunch.browser(for: url).flatMap({ Bundle(url: $0)?.bundleIdentifier }) {
-                    await Self.waitUntilFront(bundleID: browser, timeout: 4)
-                    try? await Task.sleep(for: .milliseconds(350))
+                // A page, in the browser you named or your default one.
+                var page: (url: URL, browser: String?)?
+                if case .openURL(let url) = step { page = (url, BrowserLaunch.browser(for: url).flatMap { Bundle(url: $0)?.bundleIdentifier }) }
+                if case .inBrowser(.openURL(let url), let app) = step { page = (url, Bundle(url: app.url)?.bundleIdentifier) }
+                if let page, page.url.scheme?.hasPrefix("http") == true, let browser = page.browser {
+                    await Self.waitUntilFront(bundleID: browser, timeout: 2.5)
+                    // A click or shortcut next has to land in the browser, not wherever you were.
+                    let next = steps[index + 1]
+                    var needsFront = false
+                    if case .press = next { needsFront = true }
+                    if case .system(let key) = next, key.isKeystroke { needsFront = true }
+                    if needsFront, NSWorkspace.shared.frontmostApplication?.bundleIdentifier != browser {
+                        NSRunningApplication.runningApplications(withBundleIdentifier: browser).first?.activate()
+                        await Self.waitUntilFront(bundleID: browser, timeout: 1.5)
+                        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == browser else {
+                            return "The browser didn’t come to the front, so Murmur stopped there."
+                        }
+                    }
+                    pressTarget = NSRunningApplication.runningApplications(withBundleIdentifier: browser).first?.processIdentifier
+                    // Only a click or shortcut on the page needs it drawn; press retries until it is anyway.
+                    if needsFront { try? await Task.sleep(for: .milliseconds(150)) }
                 } else if case .openApp = step {
                     try? await Task.sleep(for: .milliseconds(120))
+                } else if case .press = step {
+                    // Let the app show what was pressed (a thread, a tab) before the next step;
+                    // typing next waits for its message box itself.
+                    try? await Task.sleep(for: .milliseconds(150))
                 }
             }
             return nil
+        case .press(let name):
+            // In the app this request opened, never one that happened to come in front.
+            return await ScreenClick.press(named: name, in: pressTarget) { [weak self] spot in self?.pressed?(spot) }
         case .inBrowser(let inner, let browser):
             BrowserLaunch.preferred = browser.url
             defer { BrowserLaunch.preferred = nil }
@@ -516,9 +662,16 @@ final class CommandCenter: ObservableObject {
     /// Murmur never presses Return, so nothing is sent without you.
     private func typeWords(_ words: String, in app: AppEntry?) async -> String? {
         if let app {
-            let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
-            guard let running = try? await NSWorkspace.shared.openApplication(at: app.url, configuration: configuration) else { return "Couldn’t open \(app.name)." }
-            await Self.waitUntilFront(running, timeout: 6)
+            // Already in front (the step before opened it): no need to open it again.
+            let running: NSRunningApplication
+            if let front = NSWorkspace.shared.frontmostApplication, front.bundleURL?.standardizedFileURL == app.url.standardizedFileURL {
+                running = front
+            } else {
+                let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
+                guard let opened = try? await NSWorkspace.shared.openApplication(at: app.url, configuration: configuration) else { return "Couldn’t open \(app.name)." }
+                running = opened
+                await Self.waitUntilFront(running, timeout: 6)
+            }
             // Chat apps take a moment to put their message box on screen.
             for attempt in 0..<12 {
                 if Composer.focus(pid: running.processIdentifier) { break }
@@ -763,8 +916,8 @@ enum MediaPlayer {
     static func youtubeVideo(_ query: String) async -> String? {
         guard let url = URL(string: "https://www.youtube.com/results?search_query=" + CommandParser.encode(query)) else { return nil }
         guard let html = await fetch(url) else { return nil }
-        return CommandParser.capture(html, "\"videoRenderer\":\\{\"videoId\":\"([A-Za-z0-9_-]{11})\"")?[1]
-            ?? CommandParser.capture(html, "\"videoId\":\"([A-Za-z0-9_-]{11})\"")?[1]
+        return CommandCenter.id(in: html, after: "\"videoRenderer\":{\"videoId\":\"", length: 11, extra: "_-")
+            ?? CommandCenter.id(in: html, after: "\"videoId\":\"", length: 11, extra: "_-")
     }
 
     /// A Spotify track for a search, found through a public web search (no account or key needed).
@@ -772,7 +925,9 @@ enum MediaPlayer {
         let search = CommandParser.encode("site:open.spotify.com/track " + query)
         for engine in ["https://search.brave.com/search?q=", "https://html.duckduckgo.com/html/?q="] {
             guard let url = URL(string: engine + search), let html = await fetch(url) else { continue }
-            if let track = CommandParser.capture(html, "spotify\\.com(?:%2F|/)track(?:%2F|/)([A-Za-z0-9]{22})")?[1] { return track }
+            for marker in ["spotify.com/track/", "spotify.com%2Ftrack%2F", "spotify.com%2Ftrack/", "spotify.com/track%2F"] {
+                if let track = CommandCenter.id(in: html, after: marker, length: 22, extra: "") { return track }
+            }
         }
         return nil
     }

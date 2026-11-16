@@ -123,13 +123,13 @@ struct OnboardingView: View {
             WaveMark(size: 56)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Talk, and it types.").font(.system(size: 28, weight: .semibold)).tracking(-0.6)
-                Text("Three things, all running on your Mac. Nothing is uploaded.")
+                Text("Dictation, notes and Commands run on your Mac. Ask uses your ChatGPT or Claude plan, only when you ask.")
                     .font(.system(size: 14)).foregroundStyle(Palette.muted)
             }
             VStack(alignment: .leading, spacing: 14) {
                 feature("keyboard", "Dictation", "Hold a key, speak, let go. Your words appear wherever you were typing.")
                 feature("person.2", "Meeting notes", "Hears both sides of any call, then writes the summary and action items.")
-                feature("command", "Commands", "Say what you want: open apps and sites, play music, set reminders.")
+                feature("sparkles", "Space + ↓", "One key for the rest: ask about your screen, or say what to do (“open Slack, go to general and type I’m in”).")
             }.padding(.top, 4)
         }
     }
@@ -291,6 +291,8 @@ struct OnboardingView: View {
             header("You’re set", "Murmur lives in your menu bar. Close this window any time.")
             VStack(spacing: 0) {
                 shortcutRow(holds ? "Dictate (hold)" : "Dictate (tap)", [preferences.dictationKey.keyCap])
+                Hairline()
+                shortcutRow("Ask about your screen", ["Space", "↑"])
                 Hairline()
                 shortcutRow("Commands", ["Space", "↓"])
                 Hairline()

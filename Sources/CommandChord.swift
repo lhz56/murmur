@@ -1,15 +1,15 @@
 import AppKit
 import ApplicationServices
 
-/// Space + Down Arrow opens Commands: press them together (either order) to
-/// type, hold them to talk. A Space on its own still types a space: it's held
+/// Space + Down Arrow opens Commands and Space + Up Arrow opens Ask: press them
+/// together (either order) to type, hold them to talk. A Space on its own still types a space: it's held
 /// back for a moment and sent as soon as another key, a click, its release or
 /// half a second shows it wasn't the shortcut, in the order you typed.
 ///
 /// Every key's release is treated the same way as its press: a press that
 /// reached the app gets its release, a press Murmur kept never does.
 struct SpaceArrowChord {
-    enum Key: Equatable { case space, down, other }
+    enum Key: Equatable { case space, down, up, other }
     enum Decision: Equatable {
         /// Let the event through untouched.
         case pass
@@ -21,10 +21,13 @@ struct SpaceArrowChord {
 
     static let spaceKey: Int64 = 49
     static let downKey: Int64 = 125
+    static let upKey: Int64 = 126
     /// Holding Space this long without the arrow means you're holding Space.
     static let holdBack: TimeInterval = 0.5
 
     private(set) var active = false
+    /// Which arrow made the shortcut: `.down` for Commands, `.up` for Ask.
+    private(set) var arrow: Key = .down
     private var spaceHeld = false, downHeld = false
     /// Space was pressed and is being held back to see if Down follows.
     private(set) var spaceDeferred = false
@@ -33,8 +36,15 @@ struct SpaceArrowChord {
     private var spaceConsumed = false, downConsumed = false
 
     /// `chord` is called with true when the shortcut goes down and false when it's released.
-    mutating func handle(_ key: Key, down: Bool, isRepeat: Bool, modified: Bool, at time: TimeInterval,
+    mutating func handle(_ pressed: Key, down: Bool, isRepeat: Bool, modified: Bool, at time: TimeInterval,
                          chord: (Bool) -> Void) -> Decision {
+        // Both arrows work the same way; only the one that starts the shortcut counts.
+        var key = pressed
+        if pressed == .up || pressed == .down {
+            if active, pressed != arrow { return .pass }
+            if !active, down, !isRepeat { arrow = pressed }
+            key = .down
+        }
         switch (key, down) {
         case (.space, true):
             if isRepeat {
@@ -85,6 +95,8 @@ struct SpaceArrowChord {
             return .pass
         case (.other, false):
             return .pass
+        case (.up, _):
+            return .pass  // Never reached: Up is handled as an arrow above.
         }
     }
 
@@ -111,6 +123,8 @@ struct SpaceArrowChord {
 @MainActor
 final class CommandChordShortcut {
     var onChord: ((Bool) -> Void)?
+    /// Space + Up Arrow, for Ask.
+    var onAskChord: ((Bool) -> Void)?
     private var chord = SpaceArrowChord()
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
@@ -150,7 +164,8 @@ final class CommandChordShortcut {
     /// Resets after an interruption, giving back a held-back Space: a press, and
     /// its release too if the key was already let go while Murmur wasn't watching.
     private func releaseHeldSpace() {
-        let hadSpace = chord.reset { [weak self] in self?.onChord?($0) }
+        let ask = chord.arrow == .up
+        let hadSpace = chord.reset { [weak self] down in if ask { self?.onAskChord?(down) } else { self?.onChord?(down) } }
         guard hadSpace, let space = heldSpace else { heldSpace = nil; return }
         heldSpace = nil
         post(space)
@@ -170,14 +185,19 @@ final class CommandChordShortcut {
         guard event.getIntegerValueField(.eventSourceUserData) != Self.marker else { return Unmanaged.passUnretained(event) }
         let isKey = type == .keyDown || type == .keyUp
         let code = isKey ? event.getIntegerValueField(.keyboardEventKeycode) : -1
-        let key: SpaceArrowChord.Key = code == SpaceArrowChord.spaceKey ? .space : code == SpaceArrowChord.downKey ? .down : .other
+        let key: SpaceArrowChord.Key = code == SpaceArrowChord.spaceKey ? .space : code == SpaceArrowChord.downKey ? .down
+            : code == SpaceArrowChord.upKey ? .up : .other
         let modified = !event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
         let isRepeat = isKey && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
         let wasDeferred = chord.spaceDeferred
+        // Which arrow this shortcut is for, worked out before `handle` changes the state.
+        let arrow = (key == .up || key == .down) && !chord.active && type == .keyDown && !isRepeat ? key : chord.arrow
+        let ask = arrow == .up
         let decision = chord.handle(key, down: type != .keyUp, isRepeat: isRepeat, modified: modified,
                                     at: ProcessInfo.processInfo.systemUptime) { [weak self] down in
+            guard let self else { return }
             // Out of the tap callback, so the keyboard never waits on Murmur.
-            DispatchQueue.main.async { self?.onChord?(down) }
+            DispatchQueue.main.async { if ask { self.onAskChord?(down) } else { self.onChord?(down) } }
         }
         if !wasDeferred, chord.spaceDeferred {
             heldSpace = event.copy()

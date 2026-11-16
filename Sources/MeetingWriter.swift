@@ -30,8 +30,13 @@ enum MeetingWriter {
             notes.actionItems[index].owner = nil
         }
         func fix(_ text: String) -> String {
-            text.replacingOccurrences(of: "\\b(Them|Other person) (will|requested|asked|said|wants|offered|suggested|plans|is|was|thinks|agreed)\\b",
-                                      with: "They $2", options: .regularExpression)
+            var text = text
+            for subject in ["Them", "Other person"] {
+                for verb in ["will", "requested", "asked", "said", "wants", "offered", "suggested", "plans", "is", "was", "thinks", "agreed"] {
+                    text = TextScan.replacing("\(subject) \(verb)", with: "They \(verb)", in: text, extra: "_", caseSensitive: true)
+                }
+            }
+            return text
         }
         notes.summary = fix(notes.summary)
         notes.decisions = notes.decisions.map(fix)

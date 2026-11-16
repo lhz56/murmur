@@ -154,6 +154,13 @@ enum CommandPlanner {
                         if call["browser"] == nil, let browser = previous["browser"] { call.arguments["browser"] = browser }
                         result.removeLast()
                     }
+                case "open_profile":
+                    // "open instagram and find messi's profile": straight to the profile, on that site.
+                    if previous.name == "open_website" {
+                        if call["site"] == nil { call.arguments["site"] = place }
+                        if call["browser"] == nil, let browser = previous["browser"] { call.arguments["browser"] = browser }
+                        result.removeLast()
+                    }
                 case "type_message":
                     // "open slack and write on my way": in Slack.
                     if call["app"] == nil, previous.name == "open_app", app(named: place, in: context) != nil {
@@ -197,7 +204,7 @@ enum CommandPlanner {
             guard let value = value?.lowercased() else { return nil }
             return browsers.first { name(of: $0) == value || $0.name.lowercased().contains(value) || value.contains(name(of: $0)) }
         }
-        let webCalls: Set<String> = ["play", "open_website", "search", "ask_ai"]
+        let webCalls: Set<String> = ["play", "open_website", "search", "ask_ai", "open_profile"]
         // A browser named anywhere in the request applies to every web step.
         let namedBrowser = calls.lazy.compactMap { browser($0["browser"]) ?? (($0.name == "open_app") ? browser($0["app"]) : nil) }.first
         let hasWeb = calls.contains { webCalls.contains($0.name) && !($0.name == "open_website" && services.contains($0["site"]?.lowercased() ?? "")) }
@@ -454,6 +461,26 @@ enum CommandPlanner {
             guard let text = call["text"], grounded(text, in: request) else { return nil }
             return CommandSuggestion(title: "New note: “\(text.prefix(50))”", subtitle: "Notes", icon: .symbol("note.text", tint: .orange),
                                      action: .addNote(text), confidence: 0.92)
+        case "click":
+            guard let target = call["target"], grounded(target, in: request), !ScreenClick.isRisky(target) else { return nil }
+            return CommandSuggestion(title: "Click “\(target)”", subtitle: "In the app in front", icon: .symbol("cursorarrow.click", tint: .neutral),
+                                     action: .press(target), confidence: 0.9)
+        case "open_profile":
+            // Straight to the profile: DuckDuckGo's first result on that site, no results page.
+            guard var who = call["query"], grounded(who, in: request) else { return nil }
+            let kinds: Set<String> = ["profile", "account", "page", "channel", "handle", "the", "of", "for", "on", "instagram", "insta"]
+            who = AssistantIntent.plain(who.replacingOccurrences(of: "’", with: "'").replacingOccurrences(of: "'s", with: ""))
+                .split(separator: " ").map(String.init).filter { !kinds.contains($0) }.joined(separator: " ")
+            guard !who.isEmpty else { return nil }
+            let name = call["site"]?.lowercased() ?? "instagram"
+            let host = Sites.searchable(name)?.home.host ?? Sites.find(name)?.site.home.host ?? (name.contains(".") ? name : name + ".com")
+            let site = host.replacingOccurrences(of: "www.", with: "")
+            guard let url = URL(string: "https://duckduckgo.com/?q=" + CommandParser.encode("\\site:\(site) \(who)")) else { return nil }
+            return web(CommandSuggestion(title: "Open \(who)’s profile", subtitle: QuickPlan.siteName(site), icon: .symbol("person.crop.circle", tint: .blue),
+                                         action: .openURL(url), confidence: 0.9))
+        case "directions":
+            guard let place = call["place"], grounded(place, in: request), let url = URL(string: "maps://?daddr=" + CommandParser.encode(place)) else { return nil }
+            return CommandSuggestion(title: "Directions to \(place)", subtitle: "Maps", icon: .symbol("map.fill", tint: .green), action: .openURL(url), confidence: 0.9)
         case "facetime":
             // Murmur can't dial yet; FaceTime opens so you can pick the person.
             guard let facetime = app(named: "FaceTime", in: context) else { return nil }
@@ -514,7 +541,7 @@ enum CommandPlanner {
     static func coverage(_ suggestion: CommandSuggestion, of request: String, context: CommandContext) -> Int {
         let said = " " + request.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "." }).joined(separator: " ") + " "
         var things = Set<String>()
-        let names = context.apps.map { $0.name.lowercased().replacingOccurrences(of: "\\s*\\(.*\\)", with: "", options: .regularExpression) }
+        let names = context.apps.map { QuickPlan.bare($0.name).lowercased() }
             + context.folders.keys.map { $0.lowercased() } + Sites.all.flatMap { [$0.name.lowercased()] + $0.names }
             + CommandParser.browserNames + services
         for name in names where name.count >= 3 && said.contains(" \(name) ") { things.insert(name) }
@@ -570,7 +597,7 @@ enum CommandPlanner {
         let lowered = text.lowercased().trimmingCharacters(in: .whitespaces)
         // An address you said ("github.com/lhz56") is opened exactly.
         let compact = lowered.replacingOccurrences(of: " ", with: "")
-        if compact.contains("."), !compact.hasSuffix("."), compact.range(of: "^[a-z0-9-]+(\\.[a-z0-9-]+)+(/\\S*)?$", options: .regularExpression) != nil || compact.hasPrefix("http"),
+        if compact.contains("."), !compact.hasSuffix("."), isAddress(compact) || compact.hasPrefix("http"),
            let url = URL(string: compact.hasPrefix("http") ? compact : "https://" + compact) {
             return CommandSuggestion(title: "Open \(compact.replacingOccurrences(of: "https://", with: ""))", subtitle: "Website", icon: .symbol("globe", tint: .blue), action: .openURL(url), confidence: 0.92)
         }
@@ -579,11 +606,19 @@ enum CommandPlanner {
         return CommandSuggestion(title: site.title, subtitle: "Website", icon: .symbol("globe", tint: .blue), action: site.action, confidence: 0.9)
     }
 
+    /// "github.com/lhz56": letters, digits and dashes, in two or more dotted parts, then any path.
+    static func isAddress(_ text: String) -> Bool {
+        let host = text.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        return labels.count >= 2 && labels.allSatisfy { !$0.isEmpty && String($0).unicodeScalars.allSatisfy(allowed.contains) }
+            && !text.contains(where: \.isWhitespace)
+    }
+
     /// An installed app by the name the model used ("T3 Code" finds "T3 Code (Beta)").
     static func app(named name: String, in context: CommandContext) -> AppEntry? {
         func plain(_ text: String) -> String {
-            text.lowercased().replacingOccurrences(of: "\\(.*\\)", with: "", options: .regularExpression)
-                .replacingOccurrences(of: ".app", with: "").trimmingCharacters(in: .whitespaces)
+            QuickPlan.bare(text).lowercased().replacingOccurrences(of: ".app", with: "").trimmingCharacters(in: .whitespaces)
         }
         let wanted = plain(name)
         guard !wanted.isEmpty else { return nil }

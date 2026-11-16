@@ -3,11 +3,16 @@ set -euo pipefail
 PROJECT_DIR=${0:A:h:h}
 RUNTIME_DIR="$PROJECT_DIR/.build/local-speech"
 mkdir -p "$RUNTIME_DIR" "$PROJECT_DIR/Resources/Helpers" "$PROJECT_DIR/Resources/Models"
-/usr/bin/swift build --package-path "$PROJECT_DIR/LocalSpeech" -c release --jobs 4
+# --disable-keychain: SwiftPM otherwise waits on an invisible Keychain prompt when it downloads binaries.
+/usr/bin/swift build --package-path "$PROJECT_DIR/LocalSpeech" -c release --jobs 4 --disable-keychain
 cp "$PROJECT_DIR/LocalSpeech/.build/release/MurmurParakeet" "$PROJECT_DIR/Resources/Helpers/"
 for bundle in "$PROJECT_DIR"/LocalSpeech/.build/release/*.bundle; do
   ditto "$bundle" "$PROJECT_DIR/Resources/Helpers/${bundle:t}"
 done
+# Ask's natural voice (Kokoro). Its own package, on a newer FluidAudio than Parakeet.
+/usr/bin/swift build --package-path "$PROJECT_DIR/LocalVoice" -c release --jobs 4 --disable-keychain
+cp "$PROJECT_DIR/LocalVoice/.build/release/MurmurVoice" "$PROJECT_DIR/Resources/Helpers/"
+ditto "$PROJECT_DIR/LocalVoice/.build/release/FluidAudio_FluidAudio.bundle" "$PROJECT_DIR/Resources/Helpers/FluidAudio_FluidAudio.bundle"
 # --parakeet-only skips whisper.cpp and its ~550 MB model. Parakeet is the
 # recommended engine: it runs on the Neural Engine and stays cool.
 if [[ "${1:-}" == "--parakeet-only" ]]; then

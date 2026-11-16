@@ -564,8 +564,6 @@ final class MeetingCenter: ObservableObject {
             }
     }
 
-    private static let linkPattern = try! NSRegularExpression(pattern:
-        "https://(?:[\\w-]+\\.)?(?:zoom\\.us/[jw]/\\S+|meet\\.google\\.com/[a-z-]+|teams\\.microsoft\\.com/l/meetup-join/\\S+|teams\\.live\\.com/\\S+|whereby\\.com/\\S+|[\\w-]+\\.webex\\.com/\\S+|discord\\.gg/\\S+)", options: [.caseInsensitive])
 
     static func joinLink(_ event: EKEvent) -> URL? {
         if let url = event.url, url.scheme?.hasPrefix("http") == true, linkMatch(url.absoluteString) != nil { return url }
@@ -576,9 +574,42 @@ final class MeetingCenter: ObservableObject {
     }
 
     static func linkMatch(_ text: String) -> String? {
-        guard let match = linkPattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              let range = Range(match.range, in: text) else { return nil }
-        return String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ">)\"'.,"))
+        // Each "https://", up to the next space, checked against the call services.
+        var from = text.startIndex
+        while let start = text.range(of: "https://", options: .caseInsensitive, range: from..<text.endIndex) {
+            from = start.upperBound
+            let end = text[start.upperBound...].firstIndex(where: \.isWhitespace) ?? text.endIndex
+            let address = text[start.upperBound..<end]
+            if let length = callLink(String(address)) {
+                return String(text[start.lowerBound..<address.index(address.startIndex, offsetBy: length)])
+                    .trimmingCharacters(in: CharacterSet(charactersIn: ">)\"'.,"))
+            }
+        }
+        return nil
+    }
+
+    /// How much of `address` (after "https://") is a Zoom, Meet, Teams, Whereby, Webex or
+    /// Discord call link, or nil. One extra subdomain in front ("us02web.zoom.us") is fine.
+    private static func callLink(_ address: String) -> Int? {
+        let lower = address.lowercased()
+        func isName(_ character: Character) -> Bool { character.isLetter || character.isNumber || character == "_" || character == "-" }
+        var starts = [0]
+        if let dot = lower.firstIndex(of: "."), dot > lower.startIndex, lower[..<dot].allSatisfy(isName) { starts.insert(lower.distance(from: lower.startIndex, to: dot) + 1, at: 0) }
+        for skip in starts {
+            let rest = String(lower.dropFirst(skip))
+            // Services whose link runs to the next space.
+            for prefix in ["zoom.us/j/", "zoom.us/w/", "teams.microsoft.com/l/meetup-join/", "teams.live.com/", "whereby.com/", "discord.gg/"]
+            where rest.hasPrefix(prefix) && rest.count > prefix.count { return address.count }
+            // "<team>.webex.com/…".
+            if let range = rest.range(of: ".webex.com/"), range.lowerBound > rest.startIndex, rest[..<range.lowerBound].allSatisfy(isName),
+               range.upperBound < rest.endIndex { return address.count }
+            // Meet codes are letters and dashes.
+            if rest.hasPrefix("meet.google.com/") {
+                let code = rest.dropFirst(16).prefix { ("a"..."z").contains($0) || $0 == "-" }
+                if !code.isEmpty { return skip + 16 + code.count }
+            }
+        }
+        return nil
     }
 
     /// Opens the event's call link and starts taking notes.

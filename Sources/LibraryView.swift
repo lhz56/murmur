@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// Sidebar · transcript list · page.
+/// Sidebar · Home, or a list and its page.
 struct MainView: View {
     @ObservedObject var model: AppModel
     @FocusState private var searchFocused: Bool
@@ -11,9 +11,12 @@ struct MainView: View {
         // Filter once per render; rows, headers and keyboard navigation share it.
         let visible = model.visibleTranscripts
         HStack(spacing: 0) {
-            SidebarView(model: model, speech: model.speech, meetings: model.meetings).frame(width: 228)
+            SidebarView(model: model, speech: model.speech, meetings: model.meetings).frame(width: 212)
             Hairline(vertical: true)
             switch model.section {
+            case .home:
+                HomeView(model: model, assistant: model.assistant, meetings: model.meetings)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .transcripts:
                 listColumn(visible).frame(width: 312)
                 Hairline(vertical: true)
@@ -40,6 +43,9 @@ struct MainView: View {
             case .commands:
                 CommandsPage(center: model.commands) { model.openCommands?() }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .health:
+                MacHealthView(health: model.health, preferences: model.preferences, assistant: model.assistant, live: !model.isPreview)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Palette.canvas)
@@ -53,7 +59,9 @@ struct MainView: View {
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: model.toast)
         .sheet(isPresented: $model.showSettings) {
-            SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck)
+            SettingsView(model: model, preferences: model.preferences, speech: model.speech, microphoneCheck: model.microphoneCheck,
+                         initialPane: model.settingsPane)
+                .onDisappear { model.settingsPane = .general }
         }
         .sheet(isPresented: $model.showStats) { StatsView(model: model, preferences: model.preferences) }
         .sheet(isPresented: $model.showOnboarding) {
@@ -65,7 +73,7 @@ struct MainView: View {
         } message: { Text(model.errorMessage ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshPermissions() }
         .onReceive(NotificationCenter.default.publisher(for: .murmurSearch)) { _ in
-            if model.section == .commands { model.section = .transcripts }
+            if model.section != .transcripts { model.section = .transcripts }
             searchFocused = true
         }
         .alert("Meetings", isPresented: Binding(get: { model.meetings.errorMessage != nil }, set: { if !$0 { model.meetings.errorMessage = nil } })) {
@@ -79,7 +87,18 @@ struct MainView: View {
         VStack(spacing: 0) {
             HStack(spacing: 2) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(model.filter.rawValue).font(.system(size: 13, weight: .semibold))
+                    Menu {
+                        Picker("Show", selection: Binding(get: { model.filter }, set: { model.filter = $0; model.selectedID = nil })) {
+                            Text("All dictations").tag(LibraryFilter.all)
+                            Label("Favorites", systemImage: "star").tag(LibraryFilter.favorites)
+                            Label("Trash", systemImage: "trash").tag(LibraryFilter.trash)
+                        }.pickerStyle(.inline)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(model.filter == .all ? "Dictations" : model.filter.rawValue).font(.system(size: 13, weight: .semibold))
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.faint)
+                        }
+                    }.menuStyle(.button).buttonStyle(.plain).fixedSize().help("Show all, favorites or trash")
                     Text(caption(count: visible.count)).font(.system(size: 11)).foregroundStyle(Palette.muted)
                         .contentTransition(.numericText())
                 }
@@ -216,40 +235,24 @@ struct SidebarView: View {
     @ObservedObject var meetings: MeetingCenter
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
-                WaveMark(size: 20)
-                Text("Murmur").font(.system(size: 14, weight: .semibold))
-            }.padding(.horizontal, 10).padding(.top, 48).padding(.bottom, 14)
+                WaveMark(size: 22)
+                Text("Murmur").font(.system(size: 14.5, weight: .semibold))
+            }.padding(.horizontal, 10).padding(.top, 50).padding(.bottom, 18)
 
-            SidebarItem(title: speech.phase == .recording ? "Finish recording" : "New recording",
-                        symbol: speech.phase == .recording ? "stop.circle" : "mic", badge: "⌘N") { model.toggleRecording() }
-                .disabled(speech.phase.isBusy && speech.phase != .recording)
-            SidebarItem(title: meetings.liveID == nil ? "Take meeting notes" : "End meeting",
-                        symbol: meetings.liveID == nil ? "person.2.wave.2" : "stop.circle") {
-                if meetings.liveID == nil { meetings.start() } else { meetings.stop() }
-                model.section = .meetings
-            }
-            SidebarItem(title: "Commands", symbol: "command", selected: model.section == .commands, badge: "Space ↓") { model.section = .commands }
-            SidebarItem(title: "Search", symbol: "magnifyingglass", badge: "⌘F") {
-                NotificationCenter.default.post(name: .murmurSearch, object: nil)
-            }
-
-            Text("Library").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
-                .padding(.horizontal, 10).padding(.top, 20).padding(.bottom, 4)
-            SidebarItem(title: "Dictations", symbol: "tray.full", selected: model.section == .transcripts && model.filter == .all,
+            SidebarItem(title: "Home", symbol: "house", selected: model.section == .home) { model.section = .home }
+            SidebarItem(title: "Dictations", symbol: "waveform", selected: model.section == .transcripts,
                         badge: "\(model.savedCount)") {
-                model.section = .transcripts; model.filter = .all; model.selectedID = nil; model.search = ""
+                if model.section != .transcripts { model.filter = .all; model.selectedID = nil; model.search = "" }
+                model.section = .transcripts
             }
             SidebarItem(title: "Meetings", symbol: "person.2", selected: model.section == .meetings,
                         badge: meetings.liveID != nil ? "●" : "\(meetings.visible.count)") {
                 model.section = .meetings
             }
-            ForEach([LibraryFilter.favorites, .trash], id: \.self) { filter in
-                SidebarItem(title: filter.rawValue, symbol: symbol(for: filter), selected: model.section == .transcripts && model.filter == filter) {
-                    model.section = .transcripts; model.filter = filter; model.selectedID = nil; model.search = ""
-                }
-            }
+            SidebarItem(title: "Commands", symbol: "command", selected: model.section == .commands, badge: "Space ↓") { model.section = .commands }
+            HealthSidebarItem(health: model.health, selected: model.section == .health) { model.section = .health }
 
             Spacer(minLength: 16)
             if meetings.liveID != nil {
@@ -257,7 +260,6 @@ struct SidebarView: View {
             }
             RecordingDock(model: model, speech: speech).padding(.bottom, 8)
             Hairline().padding(.horizontal, 6).padding(.bottom, 6)
-            SidebarItem(title: "Insights", symbol: "chart.bar") { model.showStats = true }
             SidebarItem(title: "Settings", symbol: "gearshape", badge: "⌘,") { model.showSettings = true }
         }.padding(.horizontal, 8).padding(.bottom, 10)
             .frame(maxHeight: .infinity, alignment: .top)
@@ -330,15 +332,16 @@ struct RecordingDock: View {
     private var hints: some View {
         VStack(alignment: .leading, spacing: 7) {
             hintRow(model.preferences.fnBehavior == .hold && dictationKeys.count == 1 ? "Hold to dictate" : "Dictate", keys: dictationKeys)
-            hintRow("Paste last", keys: ["⌃", "⌥", "V"])
+            hintRow("Ask", keys: ["Space", "↑"])
+            hintRow("Do", keys: ["Space", "↓"])
         }.padding(.horizontal, 10).padding(.vertical, 4)
     }
 
     private func hintRow(_ title: String, keys: [String]) -> some View {
         HStack {
-            Text(title).font(.system(size: 12)).foregroundStyle(Palette.muted)
-            Spacer()
-            ShortcutKeys(keys: keys)
+            Text(title).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
+            Spacer(minLength: 4)
+            ShortcutKeys(keys: keys).fixedSize()
         }
     }
 

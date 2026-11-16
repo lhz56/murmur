@@ -54,8 +54,48 @@ enum CommandAction: Equatable {
     case sequence([CommandAction])
     /// Web pages in this command open in a particular browser ("…on Safari").
     indirect case inBrowser(CommandAction, AppEntry)
+    /// Presses the button, row or tab with this name in the app in front ("the thread called launch notes").
+    case press(String)
     /// Typed text that isn't a command yet: offer to search or ask.
     case none
+
+    /// Ask can invoke only a small set of directly requested commands. Shortcuts and keystrokes stay in Commands.
+    var allowedFromAssistant: Bool {
+        switch self {
+        case .openApp, .openSite, .play, .media, .volume, .timer: return true
+        case .openURL(let url): return ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+        case .sequence(let steps): return !steps.isEmpty && steps.count <= 4 && steps.allSatisfy { $0.allowedFromAssistant }
+        case .inBrowser(let action, _): return action.allowedFromAssistant
+        default: return false
+        }
+    }
+
+    /// Ask proposed it: is it what they said? Music, media, volume and timers are always fine;
+    /// apps and websites have to be named in their own words.
+    static func grounded(_ action: CommandAction, in request: String) -> Bool {
+        func plain(_ text: String) -> String {
+            text.lowercased().folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
+                .components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: " ")
+        }
+        let said = " " + plain(request) + " "
+        func named(_ name: String) -> Bool {
+            let words = plain(name)
+            return !words.isEmpty && said.contains(" \(words) ")
+        }
+        func site(_ host: String) -> Bool {
+            let parts = host.lowercased().split(separator: ".").filter { $0 != "www" && $0 != "m" }
+            return parts.first.map { named(String($0)) || named(host) } ?? false
+        }
+        switch action {
+        case .play, .media, .volume, .timer: return true
+        case .openApp(let app): return named(app.name)
+        case .openSite(let name): return named(name) || site(name)
+        case .openURL(let url): return site(url.host ?? "")
+        case .inBrowser(let inner, _): return grounded(inner, in: request)
+        case .sequence(let steps): return !steps.isEmpty && steps.allSatisfy { grounded($0, in: request) }
+        default: return false
+        }
+    }
 
     /// Can't be undone, so the palette asks once more.
     var needsConfirmation: Bool {
@@ -147,12 +187,45 @@ enum CommandParser {
             guard said.contains(name) else { continue }
             guard let app = context.apps.first(where: { $0.name.lowercased() == name })
                     ?? context.apps.first(where: { $0.name.lowercased().hasPrefix(name + " ") || $0.name.lowercased().hasSuffix(" " + name) }) else { continue }
-            let escaped = NSRegularExpression.escapedPattern(for: name)
-            if let match = capture(said, "^(?:open|launch|go to|use|pull up) (?:the )?\(escaped)(?: browser)?(?:,? (?:and|then|and then)|,|(?= (?:open|go to|search|look up|find|play|pull up) )) (.+)$") {
-                return (match[1], app)
+            if let rest = withoutBrowser(said, name), rest != said { return (rest, app) }
+        }
+        return nil
+    }
+
+    /// The request with the browser part taken out: "open safari and go to github" and
+    /// "go to github on safari" are both "go to github". Nil when the browser isn't
+    /// named in one of those ways.
+    static func withoutBrowser(_ said: String, _ name: String) -> String? {
+        let names = [name + " browser", name]
+        // "open safari and …", "open the chrome browser, …", "use arc then …", "open safari go to …".
+        for verb in ["open", "launch", "go to", "use", "pull up"] {
+            for article in ["the ", ""] {
+                for browser in names {
+                    let start = "\(verb) \(article)\(browser)"
+                    guard said.hasPrefix(start) else { continue }
+                    var rest = String(said.dropFirst(start.count))
+                    for joiner in [", and then ", ", and ", ", then ", " and then ", " and ", " then ", ", "] where rest.hasPrefix(joiner) {
+                        rest = String(rest.dropFirst(joiner.count)); return rest.isEmpty ? nil : rest
+                    }
+                    if rest.hasPrefix(" "), ["open", "go to", "search", "look up", "find", "play", "pull up"].contains(where: { rest.dropFirst().hasPrefix($0 + " ") }) {
+                        return String(rest.dropFirst())
+                    }
+                }
             }
-            if let match = capture(said, "^(.+?),? (?:on|in|using|with|via|through) (?:the )?\(escaped)(?: browser)?((?:,? and |,? then |, ).+)?$") {
-                return (match[1] + (match.count > 2 ? match[2] : ""), app)
+        }
+        // "… on safari", "… in the chrome browser, and …".
+        for preposition in [" on ", " in ", " using ", " with ", " via ", " through "] {
+            for article in ["the ", ""] {
+                for browser in names {
+                    let phrase = preposition + article + browser
+                    guard let range = said.range(of: phrase) else { continue }
+                    let after = said[range.upperBound...]
+                    guard after.isEmpty || after.hasPrefix(" and ") || after.hasPrefix(", ") || after.hasPrefix(" then ") || after.hasPrefix(", and ") || after.hasPrefix(", then ") else { continue }
+                    var before = String(said[..<range.lowerBound])
+                    if before.hasSuffix(",") { before.removeLast() }
+                    guard !before.isEmpty else { continue }
+                    return before + after
+                }
             }
         }
         return nil
@@ -248,11 +321,24 @@ enum CommandParser {
             .replacingOccurrences(of: "’", with: "'")
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".?!,")))
         // "hey, can you…": the comma after a greeting means nothing; other commas separate steps.
-        text = text.replacingOccurrences(of: "^(?:hey|hi|yo|okay|ok|so|um|uh|alright)(?: murmur)?\\s*,\\s*", with: "", options: .regularExpression)
-        text = text.replacingOccurrences(of: "\\s*,\\s*", with: ", ", options: .regularExpression)
-        text = text.replacingOccurrences(of: "[\\s]+", with: " ", options: .regularExpression)
+        // One space between words, and ", " after every comma.
+        text = text.components(separatedBy: ",").map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.joined(separator: ", ")
+            .trimmingCharacters(in: .whitespaces)
+        for greeting in ["hey", "hi", "yo", "okay", "ok", "so", "um", "uh", "alright"] {
+            for start in [greeting + " murmur, ", greeting + ", "] where text.hasPrefix(start) { text = String(text.dropFirst(start.count)) }
+        }
         // "recallr dot com" → "recallr.com"
-        text = text.replacingOccurrences(of: " dot (com|org|net|io|ai|app|dev|co|edu|so|xyz|me)\\b", with: ".$1", options: .regularExpression)
+        var words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        let endings: Set<String> = ["com", "org", "net", "io", "ai", "app", "dev", "co", "edu", "so", "xyz", "me"]
+        var index = 1
+        while index + 1 < words.count {
+            let ending = words[index + 1].trimmingCharacters(in: CharacterSet(charactersIn: ",.!?"))
+            if words[index] == "dot", endings.contains(ending), !words[index - 1].isEmpty {
+                words[index - 1] += "." + words[index + 1]
+                words.removeSubrange(index...(index + 1))
+            } else { index += 1 }
+        }
+        text = words.joined(separator: " ")
         var changed = true
         while changed {
             changed = false
@@ -267,13 +353,26 @@ enum CommandParser {
 
     /// "open and play this" → "play this"; "open youtube and search for lofi" → "search youtube for lofi".
     static func rephrase(_ text: String) -> String {
-        var text = text.replacingOccurrences(of: "^(?:open|find|go) and (play|search|watch|listen to|look up) ", with: "$1 ", options: .regularExpression)
-        // "open youtube and play linger": one step, not two.
-        if let match = capture(text, "^(?:open|go to|pull up|launch) (youtube music|youtube|spotify|apple music),? (?:and |then |and then )?(?:play|put on|watch|listen to) (.+)$") {
-            text = "play \(match[2]) on \(match[1])"
+        var text = text
+        for verb in ["open", "find", "go"] {
+            for action in ["play", "search", "watch", "listen to", "look up"] where text.hasPrefix("\(verb) and \(action) ") {
+                text = String(text.dropFirst(verb.count + 5))
+            }
         }
-        if let match = capture(text, "^(?:open|go to|pull up) ([a-z0-9. ]+?) and (?:search|look up|find)(?: for)? (.+)$"), Sites.searchable(match[1]) != nil {
-            text = "search \(match[1]) for \(match[2])"
+        // "open youtube and play linger": one step, not two.
+        for verb in ["open", "go to", "pull up", "launch"] {
+            for service in ["youtube music", "youtube", "spotify", "apple music"] {
+                guard var rest = strip(text, prefixes: ["\(verb) \(service)"]) ?? (text.hasPrefix("\(verb) \(service),") ? String(text.dropFirst(verb.count + service.count + 3)) : nil) else { continue }
+                rest = strip(rest, prefixes: ["and then", "and", "then"]) ?? rest
+                if let song = strip(rest, prefixes: ["play", "put on", "watch", "listen to"]) { return "play \(song) on \(service)" }
+            }
+        }
+        // "open amazon and search soccer balls": a search on Amazon.
+        for verb in ["open", "go to", "pull up"] {
+            guard let rest = strip(text, prefixes: [verb]), let and = rest.range(of: " and ") else { continue }
+            let site = String(rest[..<and.lowerBound])
+            guard Sites.searchable(site) != nil, let query = strip(String(rest[and.upperBound...]), prefixes: ["search for", "look up", "find", "search"]) else { continue }
+            return "search \(site) for \(query)"
         }
         return text
     }
@@ -529,18 +628,37 @@ enum CommandParser {
     }
 
     private static func timer(_ text: String) -> CommandSuggestion? {
-        let pattern = "^(?:set (?:a |an )?|start (?:a |an )?)?(?:(.+?) )?timer(?: for)? ([a-z0-9 ]+?) ?(seconds?|secs?|minutes?|mins?|hours?|hrs?|h|m|s)(?: (?:to|for|called) (.+))?$"
-        let remind = "^remind me in ([a-z0-9 ]+?) ?(seconds?|minutes?|mins?|hours?) (?:to )?(.+)$"
-        if let match = capture(text, pattern), let amount = number(match[2]) {
-            let seconds = amount * unit(match[3])
-            let label = match[4].isEmpty ? (match[1].isEmpty ? "Timer" : match[1].capitalizedFirst) : match[4].capitalizedFirst
+        // "timer 10 minutes", "set a pasta timer for 8 min", "10 minute timer for tea".
+        let words = text.split(separator: " ").map(String.init)
+        if let at = words.firstIndex(of: "timer") {
+            let before = words[..<at].filter { !["set", "start", "a", "an", "the"].contains($0) }
+            var after = Array(words[(at + 1)...])
+            if after.first == "for" { after.removeFirst() }
+            var label = ""
+            if let split = after.lastIndex(where: { ["to", "for", "called"].contains($0) }), split > 0 {
+                label = after[(split + 1)...].joined(separator: " "); after = Array(after[..<split])
+            }
+            // The length is either after "timer" or before it ("10 minute timer").
+            let length = after.isEmpty ? before.joined(separator: " ") : after.joined(separator: " ")
+            guard let seconds = CommandPlanner.seconds(in: length), seconds > 0 else { return nil }
+            if label.isEmpty, !after.isEmpty, !before.isEmpty { label = before.joined(separator: " ") }
+            label = label.isEmpty ? "Timer" : label.capitalizedFirst
             return .init(title: "Timer for \(duration(seconds))", subtitle: label == "Timer" ? "Murmur will chime when it’s done" : label,
                          icon: .symbol("timer", tint: .orange), action: .timer(seconds: seconds, label: label), confidence: 0.97)
         }
-        if let match = capture(text, remind), let amount = number(match[1]) {
-            let seconds = amount * unit(match[2])
-            return .init(title: "Remind me in \(duration(seconds))", subtitle: match[3].capitalizedFirst, icon: .symbol("bell", tint: .orange),
-                         action: .timer(seconds: seconds, label: match[3].capitalizedFirst), confidence: 0.96)
+        // "remind me in 20 minutes to check the oven".
+        if let rest = strip(text, prefixes: ["remind me in"]) {
+            let parts = rest.components(separatedBy: " to ")
+            let length = parts[0]
+            var what = parts.dropFirst().joined(separator: " to ")
+            if what.isEmpty {
+                let words = length.split(separator: " ").map(String.init)
+                guard let unitAt = words.firstIndex(where: { ["second", "seconds", "minute", "minutes", "min", "mins", "hour", "hours"].contains($0) }) else { return nil }
+                what = words[(unitAt + 1)...].joined(separator: " ")
+            }
+            guard let seconds = CommandPlanner.seconds(in: length), seconds > 0, !what.isEmpty else { return nil }
+            return .init(title: "Remind me in \(duration(seconds))", subtitle: what.capitalizedFirst, icon: .symbol("bell", tint: .orange),
+                         action: .timer(seconds: seconds, label: what.capitalizedFirst), confidence: 0.96)
         }
         return nil
     }
@@ -575,8 +693,12 @@ enum CommandParser {
         }
         if ["mute", "mute it", "mute the sound", "mute audio", "mute volume", "mute my mac", "silence"].contains(text) { return result("Mute", "speaker.slash.fill", .mute) }
         if ["unmute", "unmute it", "unmute the sound", "unmute audio", "sound on"].contains(text) { return result("Unmute", "speaker.wave.2.fill", .unmute) }
-        if let match = capture(text, "^(?:set |turn )?(?:the )?volume (?:to |at )?([a-z0-9 ]+?)(?: percent|%)?$"), let level = number(match[1]) ?? percentWords(match[1]) {
-            return result("Volume \(min(level, 100))%", "speaker.wave.2.fill", .set(min(level, 100)))
+        if var level = strip(text, prefixes: ["set the volume to", "set the volume at", "set volume to", "set the volume", "set volume", "turn the volume to",
+                                              "turn volume to", "the volume to", "volume to", "volume at", "volume"]) {
+            for ending in [" percent", "%"] where level.hasSuffix(ending) { level = String(level.dropLast(ending.count)) }
+            if let amount = number(level) ?? percentWords(level), !["up", "down"].contains(level) {
+                return result("Volume \(min(amount, 100))%", "speaker.wave.2.fill", .set(min(amount, 100)))
+            }
         }
         let up = ["volume up", "turn it up", "turn up the volume", "turn the volume up", "louder", "make it louder", "increase volume", "increase the volume", "raise the volume"]
         let down = ["volume down", "turn it down", "turn down the volume", "turn the volume down", "quieter", "make it quieter", "softer", "lower the volume", "decrease volume", "decrease the volume"]
@@ -629,8 +751,9 @@ enum CommandParser {
     }
 
     private static func shortcut(_ text: String, context: CommandContext) -> CommandSuggestion? {
-        guard let match = capture(text, "^(?:run|do|start|trigger) (?:the |my )?(?:shortcut )?(.+?)(?: shortcut)?$") ?? capture(text, "^shortcut (.+)$") else { return nil }
-        let name = match[1]
+        guard var name = strip(text, prefixes: ["run", "do", "start", "trigger"]).map({ strip($0, prefixes: ["the", "my"]) ?? $0 })
+                .map({ strip($0, prefixes: ["shortcut"]) ?? $0 }) ?? strip(text, prefixes: ["shortcut"]) else { return nil }
+        if name.hasSuffix(" shortcut") { name = String(name.dropLast(9)) }
         let saidShortcut = text.contains("shortcut")
         let found = context.shortcuts.map { ($0, appScore(name, $0)) }.max { $0.1 < $1.1 }
         if let found, found.1 >= 0.72 {
@@ -660,7 +783,7 @@ enum CommandParser {
             }
             query = String(selection.prefix(120))
         }
-        query = query.replacingOccurrences(of: "^(some|a little|the song|the video|the album|the playlist|songs by|music by) ", with: "", options: .regularExpression)
+        query = strip(query, prefixes: ["some", "a little", "the song", "the video", "the album", "the playlist", "songs by", "music by"]) ?? query
         guard !query.isEmpty else { return nil }
         let tint: CommandSuggestion.Icon.Tint = service == .spotify ? .green : service == .appleMusic ? .pink : .red
         return .init(title: "Play “\(query)”", subtitle: service.rawValue, icon: .symbol("play.fill", tint: tint), action: .play(query, on: service), confidence: 0.93)
@@ -675,9 +798,8 @@ enum CommandParser {
         ]
         for service in services {
             for name in service.names {
-                if let match = capture(text, "^(?:ask|tell|hey) \(NSRegularExpression.escapedPattern(for: name))(?: to| about| for)? (.+)$")
-                    ?? capture(text, "^\(NSRegularExpression.escapedPattern(for: name)),? (.+)$") {
-                    let question = match[1]
+                let asked = strip(text, prefixes: ["ask \(name)", "tell \(name)", "hey \(name)"]).map { strip($0, prefixes: ["to", "about", "for"]) ?? $0 }
+                if let question = asked ?? strip(text, prefixes: ["\(name),", name]) {
                     return .init(title: "Ask \(service.name): “\(question.prefix(60))”", subtitle: service.name, icon: .symbol("bubble.left.and.text.bubble.right.fill", tint: .purple),
                                  action: .openURL(URL(string: service.url + encode(question))!), confidence: 0.95)
                 }
@@ -689,20 +811,37 @@ enum CommandParser {
     private static func search(_ text: String) -> CommandSuggestion? {
         // "search youtube for lofi", "search for flights on google", "google best ramen", "look up X on wikipedia", "youtube cat videos"
         var engine: String?, query: String?
-        if let match = capture(text, "^(?:search|look up|find|look for) (?:on )?([a-z0-9. ]+?) for (.+)$"), Sites.searchable(match[1]) != nil {
-            engine = match[1]; query = match[2]
-        } else if let match = capture(text, "^(?:search|look up|find|look for|search for) (.+?) (?:on|in|at) ([a-z0-9. ]+)$"), Sites.searchable(match[2]) != nil {
-            engine = match[2]; query = match[1]
-        } else if let match = capture(text, "^(google|youtube|bing|amazon|wikipedia|reddit|github|twitter|x|linkedin|tiktok|duckduckgo|maps|google maps) (?:for )?(.+)$") {
-            engine = match[1]; query = match[2]
-        } else if capture(text, "^(?:what|whats|what's|who|whos|who's|when|where|wheres|why|how|is|are|does|do|can|which|define|weather)\\b") != nil, !text.hasPrefix("do ") {
+        let verbs = ["search for", "search", "look up", "find", "look for"]
+        if let rest = strip(text, prefixes: verbs), let split = rest.range(of: " for ") {
+            // "search youtube for lofi", "search on amazon for soccer balls".
+            let site = strip(String(rest[..<split.lowerBound]), prefixes: ["on"]) ?? String(rest[..<split.lowerBound])
+            if Sites.searchable(site) != nil { engine = site; query = String(rest[split.upperBound...]) }
+        }
+        if engine == nil, let rest = strip(text, prefixes: verbs) {
+            // "search for flights on google", "look up X on wikipedia".
+            for joiner in [" on ", " in ", " at "] {
+                guard let split = rest.range(of: joiner, options: .backwards) else { continue }
+                let site = String(rest[split.upperBound...])
+                if Sites.searchable(site) != nil { engine = site; query = String(rest[..<split.lowerBound]); break }
+            }
+        }
+        if engine == nil {
+            // "google best ramen", "youtube cat videos".
+            for site in ["google maps", "google", "youtube", "bing", "amazon", "wikipedia", "reddit", "github", "twitter", "x", "linkedin", "tiktok", "duckduckgo", "maps"] {
+                if let rest = strip(text, prefixes: [site]) { engine = site; query = strip(rest, prefixes: ["for"]) ?? rest; break }
+            }
+        }
+        if engine == nil, let first = text.split(separator: " ").first.map(String.init),
+           ["what", "whats", "what's", "who", "whos", "who's", "when", "where", "wheres", "why", "how", "is", "are", "does", "can", "which", "define", "weather"].contains(first) {
             engine = "google"; query = text
-        } else if let match = capture(text, "^(?:search for|search|look up|google) ?(.*)$") {
-            engine = "google"
-            query = match[1]
+        }
+        if engine == nil {
+            for verb in ["search for", "search", "look up", "google"] where text == verb || text.hasPrefix(verb + " ") {
+                engine = "google"; query = String(text.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces); break
+            }
         }
         guard let engine, var query, !query.isEmpty, let site = Sites.searchable(engine) else { return nil }
-        query = query.replacingOccurrences(of: "^for ", with: "", options: .regularExpression)
+        query = strip(query, prefixes: ["for"]) ?? query
         return .init(title: "Search \(site.name) for “\(query.prefix(60))”", subtitle: site.name, icon: .symbol("magnifyingglass", tint: .blue),
                      action: .openURL(searchURL(engine, query)), confidence: 0.9)
     }
@@ -740,25 +879,36 @@ enum CommandParser {
         if let row = table.first(where: { $0.phrases.contains(text) }) {
             return .init(title: row.title, subtitle: URL(string: row.url)?.host ?? "Mail", icon: .symbol(row.symbol, tint: .blue), action: .openURL(URL(string: row.url)!), confidence: 0.95)
         }
-        if let match = capture(text, "^(?:email|send an email to|write an email to|mail) ([^ ]+@[^ ]+)(?: (?:about|saying|that) (.+))?$") {
-            var url = "mailto:\(match[1])"
-            if !match[2].isEmpty { url += "?subject=" + encode(match[2].capitalizedFirst) }
-            return .init(title: "Email \(match[1])", subtitle: match[2].isEmpty ? "Mail" : match[2].capitalizedFirst, icon: .symbol("envelope.fill", tint: .blue),
-                         action: .openURL(URL(string: url)!), confidence: 0.93)
+        // "email sam@x.com about the launch".
+        if let rest = strip(text, prefixes: ["send an email to", "write an email to", "email", "mail"]), let address = rest.split(separator: " ").first.map(String.init),
+           address.contains("@"), !address.hasPrefix("@"), !address.hasSuffix("@") {
+            let after = String(rest.dropFirst(address.count)).trimmingCharacters(in: .whitespaces)
+            let subject = strip(after, prefixes: ["about", "saying", "that"]) ?? ""
+            guard after.isEmpty || !subject.isEmpty, let url = URL(string: "mailto:\(address)" + (subject.isEmpty ? "" : "?subject=" + encode(subject.capitalizedFirst))) else { return nil }
+            return .init(title: "Email \(address)", subtitle: subject.isEmpty ? "Mail" : subject.capitalizedFirst, icon: .symbol("envelope.fill", tint: .blue),
+                         action: .openURL(url), confidence: 0.93)
         }
         return nil
     }
 
     private static func directions(_ text: String) -> CommandSuggestion? {
-        guard let match = capture(text, "^(?:directions to|navigate to|take me to|how do i get to|route to|get directions to) (.+)$") else { return nil }
+        guard let place = strip(text, prefixes: ["get directions to", "directions to", "navigate to", "take me to", "how do i get to", "route to"]) else { return nil }
         // "take me to youtube" is a website, not a drive.
-        if Sites.find(match[1])?.exact == true || webURL(match[1]) != nil { return nil }
-        return .init(title: "Directions to \(match[1].capitalizedFirst)", subtitle: "Maps", icon: .symbol("map.fill", tint: .green),
-                     action: .openURL(URL(string: "maps://?daddr=" + encode(match[1]))!), confidence: 0.85)
+        if Sites.find(place)?.exact == true || webURL(place) != nil { return nil }
+        return .init(title: "Directions to \(place.capitalizedFirst)", subtitle: "Maps", icon: .symbol("map.fill", tint: .green),
+                     action: .openURL(URL(string: "maps://?daddr=" + encode(place))!), confidence: 0.85)
     }
 
     private static func translate(_ text: String) -> CommandSuggestion? {
-        guard let match = capture(text, "^translate (.+?)(?: (?:to|into) ([a-z]+))?$") else { return nil }
+        guard let rest = strip(text, prefixes: ["translate"]) else { return nil }
+        // "translate good morning to spanish": the last "to"/"into" and one word after it.
+        var match = ["", rest, ""]
+        for joiner in [" into ", " to "] {
+            if let split = rest.range(of: joiner, options: .backwards) {
+                let language = String(rest[split.upperBound...])
+                if !language.isEmpty, language.allSatisfy({ ("a"..."z").contains($0) }) { match = ["", String(rest[..<split.lowerBound]), language]; break }
+            }
+        }
         let languages = ["spanish": "es", "french": "fr", "german": "de", "chinese": "zh-CN", "japanese": "ja", "korean": "ko", "italian": "it",
                          "portuguese": "pt", "arabic": "ar", "hindi": "hi", "burmese": "my", "russian": "ru", "english": "en", "thai": "th", "vietnamese": "vi"]
         let target = languages[match[2]] ?? "en"
@@ -774,31 +924,64 @@ enum CommandParser {
     /// words to type are preserved; politeness before the command is dropped.
     static func typing(_ input: String, context: CommandContext) -> CommandSuggestion? {
         var raw = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        raw = raw.replacingOccurrences(of: "^(?i:(?:hey |ok |okay )?murmur,? |(?:can|could|would) you (?:please )?|please )+", with: "", options: .regularExpression)
-        let verb = "(?:type|write|paste|dictate|send)(?: (?:that|this|the following|out))?[:,]?"
+        // Politeness in front, in any case: "Hey Murmur, can you please …".
+        var trimmed = true
+        while trimmed {
+            trimmed = false
+            for opener in ["hey murmur, ", "hey murmur ", "ok murmur, ", "ok murmur ", "okay murmur, ", "okay murmur ", "murmur, ", "murmur ",
+                           "can you please ", "could you please ", "would you please ", "can you ", "could you ", "would you ", "please "]
+            where raw.lowercased().hasPrefix(opener) {
+                raw = String(raw.dropFirst(opener.count)); trimmed = true
+            }
+        }
+        // `prefixes` at the start of `text`, any case; what follows keeps its case.
+        func after(_ text: String, _ prefixes: [String]) -> String? {
+            for prefix in prefixes where text.lowercased().hasPrefix(prefix + " ") {
+                let rest = String(text.dropFirst(prefix.count + 1)).trimmingCharacters(in: .whitespaces)
+                if !rest.isEmpty { return rest }
+            }
+            return nil
+        }
+        let verbs = ["type", "write", "paste", "dictate", "send"]
+        // "type: hi", "write out hi", "type the following, hi".
+        func dictated(_ text: String) -> String? {
+            guard var rest = after(text, verbs) else { return nil }
+            rest = after(rest, ["that", "this", "the following", "out"]) ?? rest
+            if rest.hasPrefix(":") || rest.hasPrefix(",") { rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            return rest.isEmpty ? nil : rest
+        }
         func app(_ name: String) -> AppEntry? {
             guard let found = matchApp(name.lowercased(), in: context), found.score >= 0.8 else { return nil }
             return found.app
         }
         var target: (words: String, app: AppEntry?)?
-        if let match = capture(raw, "^(?i:(?:open|go to|switch to|pull up) (.+?) and " + verb + ") (.+)$"), let found = app(match[1]) {
-            target = (match[2], found)
-        } else if let match = capture(raw, "^(?i:(?:tell|message|reply to)) (.+)$") {
+        if let rest = after(raw, ["open", "go to", "switch to", "pull up"]), let and = rest.range(of: " and ", options: .caseInsensitive),
+           let found = app(String(rest[..<and.lowerBound])), let words = dictated(String(rest[and.upperBound...])) {
+            // "open claude and write fix the login bug".
+            target = (words, found)
+        } else if let rest = after(raw, ["tell", "message", "reply to"]) {
             // "tell T3 Code to run the tests": the longest app name wins.
-            let words = match[1].split(separator: " ").map(String.init)
+            let words = rest.split(separator: " ").map(String.init)
             for count in stride(from: min(4, words.count - 1), through: 1, by: -1) {
                 guard let found = app(words.prefix(count).joined(separator: " ")) else { continue }
                 var rest = words.dropFirst(count).joined(separator: " ")
-                rest = rest.replacingOccurrences(of: "^(?i:to|that)\\b[:,]? ?|^[:,] ?", with: "", options: .regularExpression)
+                rest = after(rest, ["to", "that", "to:", "that:", "to,", "that,"]) ?? rest
+                if rest.hasPrefix(":") || rest.hasPrefix(",") { rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces) }
                 if !rest.isEmpty { target = (rest, found) }
                 break
             }
-        } else if let match = capture(raw, "^(?i:(?:in|on|into) (.+?),? " + verb + ") (.+)$"), let found = app(match[1]) {
-            target = (match[2], found)
-        } else if let match = capture(raw, "^(?i:" + verb + ") (.+) (?i:in|into|on) (.+?)$"), let found = app(match[2]) {
-            target = (match[1], found)
-        } else if let match = capture(raw, "^(?i:" + verb + ") (.+)$") {
-            target = (match[1], nil)
+        } else if let rest = after(raw, ["in", "on", "into"]), let verbAt = verbs.lazy.compactMap({ rest.range(of: " " + $0 + " ", options: .caseInsensitive) ?? rest.range(of: ", " + $0 + " ", options: .caseInsensitive) }).first,
+                  let found = app(String(rest[..<verbAt.lowerBound])), let words = dictated(String(rest[rest.index(after: verbAt.lowerBound)...]).trimmingCharacters(in: CharacterSet(charactersIn: ", "))) {
+            // "in slack type on my way".
+            target = (words, found)
+        } else if let words = dictated(raw) {
+            // "type see you at 5 in messages", or just "type see you at 5".
+            var placed: (String, AppEntry)?
+            for joiner in [" in ", " into ", " on "] {
+                guard let split = words.range(of: joiner, options: [.caseInsensitive, .backwards]) else { continue }
+                if let found = app(String(words[split.upperBound...])) { placed = (String(words[..<split.lowerBound]), found); break }
+            }
+            target = placed.map { ($0.0, Optional($0.1)) } ?? (words, nil)
         }
         guard let (initialWords, app) = target else { return nil }; var words = initialWords
         words = words.trimmingCharacters(in: .whitespaces)
@@ -823,11 +1006,7 @@ enum CommandParser {
         if case .inBrowser(let wrapped, _) = inner {
             inner = wrapped
             // The browser part ("open safari, …", "… in chrome") is already accounted for.
-            for name in browserNames where said.contains(name) {
-                let escaped = NSRegularExpression.escapedPattern(for: name)
-                said = said.replacingOccurrences(of: "^(?:open|launch|go to|use|pull up) (?:the )?\(escaped)(?: browser)?(?:,? (?:and|then|and then)|,|(?= (?:open|go to|search|look up|find|play|pull up) )) ", with: "", options: .regularExpression)
-                    .replacingOccurrences(of: ",? (?:on|in|using|with|via|through) (?:the )?\(escaped)(?: browser)?", with: "", options: .regularExpression)
-            }
+            for name in browserNames where said.contains(name) { said = withoutBrowser(said, name) ?? said }
         }
         // Several parts ("play kendrick and turn it up") need every part accounted for,
         // counted after merging ("open amazon and search X" is one search on Amazon).
@@ -894,14 +1073,6 @@ enum CommandParser {
 
     // MARK: Helpers
 
-    static func capture(_ text: String, _ pattern: String) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
-        return (0..<match.numberOfRanges).map { index in
-            Range(match.range(at: index), in: text).map { String(text[$0]) } ?? ""
-        }
-    }
-
     static func encode(_ text: String) -> String {
         text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#"))) ?? text
     }
@@ -940,7 +1111,7 @@ enum Sites {
         site("X", "https://x.com", "https://x.com/search?q=", ["twitter", "x", "x.com"]),
         site("Reddit", "https://www.reddit.com", "https://www.reddit.com/search/?q=", ["reddit"]),
         site("LinkedIn", "https://www.linkedin.com", "https://www.linkedin.com/search/results/all/?keywords=", ["linkedin", "linked in"]),
-        site("Instagram", "https://www.instagram.com", nil, ["instagram", "insta", "ig"]),
+        site("Instagram", "https://www.instagram.com", "https://www.instagram.com/explore/search/keyword/?q=", ["instagram", "insta", "ig"]),
         site("TikTok", "https://www.tiktok.com", "https://www.tiktok.com/search?q=", ["tiktok", "tik tok"]),
         site("Netflix", "https://www.netflix.com", "https://www.netflix.com/search?q=", ["netflix"]),
         site("Amazon", "https://www.amazon.com", "https://www.amazon.com/s?k=", ["amazon"]),

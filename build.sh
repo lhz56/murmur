@@ -3,8 +3,13 @@ set -euo pipefail
 umask 077
 PROJECT_DIR=${0:A:h}
 APP_DIR="$PROJECT_DIR/Murmur.app"
+# Tools/Release.sh builds into dist/ instead, which never touches the copy you run.
+if [[ -n ${MURMUR_APP_DIR:-} ]]; then
+  APP_DIR=${MURMUR_APP_DIR:A}
+  export MURMUR_ALLOW_RUNNING=1
+fi
 require_closed_app() {
-  if /usr/bin/pgrep -x Murmur >/dev/null 2>&1; then
+  if [[ ${MURMUR_ALLOW_RUNNING:-} != 1 ]] && /usr/bin/pgrep -x Murmur >/dev/null 2>&1; then
     print -u2 'Quit Murmur before rebuilding so its running signature stays intact.'
     exit 3
   fi
@@ -42,6 +47,7 @@ trap 'exit 143' TERM
 
 # Retain already bundled models/helpers when rebuilding a source checkout
 # whose Resources directory may omit those large downloaded files.
+mkdir -p "${APP_DIR:h}"
 if [[ -d "$APP_DIR" ]]; then
   /usr/bin/ditto "$APP_DIR" "$STAGED_APP"
 fi
